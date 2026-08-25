@@ -6,28 +6,25 @@ Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gat
 
 ## Fitur Utama
 
-### Pengalaman Pembeli
-* **Wajib Join Channel (Force Subscribe)**: Pengunjung wajib bergabung ke channel Telegram Anda sebelum dapat mengakses menu belanja dan melihat katalog produk.
-* **Pembayaran QRIS Real-Time**: Tagihan QRIS dinamis langsung muncul di chat Telegram. Mendukung pembayaran dari seluruh e-wallet (GoPay, OVO, Dana, ShopeePay, LinkAja) dan m-Banking (BCA, Mandiri, BRI, BNI, dll).
-* **Pengiriman Instan (Instant Delivery)**: Akun, lisensi, atau produk digital langsung dikirimkan ke pembeli otomatis setelah pembayaran terverifikasi.
-* **Auto-Pin Pesan**: Invoice dan data akun otomatis di-pin di ruang chat pembeli agar mudah ditemukan.
-* **Pilihan Jumlah Pembelian (Bulk Order)**: Pembeli dapat memilih jumlah unit yang ingin dibeli secara fleksibel.
-* **Riwayat Pesanan (`/orders`)**: Pembeli dapat mengecek riwayat pesanan mereka kapan saja.
+### 1. Pembelian & Transaksi
+* **Force Subscribe**: Membatasi akses menu bot hanya untuk pengguna yang telah bergabung ke channel Telegram yang ditentukan.
+* **QRIS Real-Time**: Pembuatan tagihan QRIS dinamis secara otomatis yang dapat dibayar melalui seluruh e-wallet dan m-Banking.
+* **Pengiriman Otomatis (Instant Delivery)**: Mengirimkan data akun, lisensi, atau file digital langsung ke pembeli setelah status pembayaran terkonfirmasi lunas.
+* **Auto-Pin Invoice**: Menyematkan pesan invoice dan detail akun secara otomatis di ruang obrolan pembeli.
+* **Pilihan Jumlah (Bulk Order)**: Memungkinkan pembeli memilih atau memasukkan jumlah unit produk yang ingin dibeli.
+* **Riwayat Pesanan**: Memudahkan pembeli melacak riwayat dan status transaksi melalui perintah `/orders`.
 
-### Notifikasi Channel & Promosi
-* **Auto Generate Gambar Struk (JPG HD)**: Bot otomatis membuat gambar struk beresolusi tinggi (1000x1000) dan mempostingnya ke channel Telegram sebagai bukti transaksi sukses.
-* **Proteksi Privasi Pembeli**: Username pembeli disensor otomatis dan data akun/lisensi pembeli tetap privat (tidak dikirim ke channel publik).
-* **Tombol Beli di Channel**: Dilengkapi tombol tautan langsung ke bot untuk mempermudah anggota channel melakukan pembelian berikutnya.
+### 2. Notifikasi Channel & Promosi
+* **Auto Generate Struk Visual (JPG)**: Membuat gambar struk transaksi secara dinamis (1000x1000) dan mempostingnya ke channel sebagai bukti transaksi sukses.
+* **Sensor Privasi**: Menyensor username pembeli dan menyembunyikan detail akun/lisensi agar keamanan data pembeli tetap terjaga di channel publik.
+* **Tombol Belanja Cepat**: Menyertakan tombol tautan langsung ke bot pada setiap postingan struk di channel.
 
-### Panel Owner / Admin
-* **Panel Kontrol Produk (`/admin`)**:
-  * Tambah produk baru (nama, deskripsi, harga, stok, pesan pengiriman).
-  * Edit data produk (nama, deskripsi, harga, info akun).
-  * Pengaturan stok cepat (tambah, kurangi, kosongkan, atau set Unlimited).
-  * Manajemen stok akun unik (Account Pool) untuk mendistribusikan akun berbeda per pembeli.
-* **Kirim Pesan Broadcast (`/broadcast`)**: Mengirim pengumuman atau promosi ke seluruh database pengguna bot.
-* **Keamanan Stok & Anti-Duplikasi**: Reservasi stok otomatis saat order dibuat dan dikembalikan jika pembayaran kedaluwarsa atau dibatalkan.
-* **Sistem Verifikasi Ganda**: Menggunakan Webhook FastAPI dan background worker otomatis untuk memastikan status pembayaran terdeteksi tanpa jeda.
+### 3. Pengelolaan Toko (Owner / Admin)
+* **Panel Kontrol Produk (`/admin`)**: Menambah, mengubah nama, harga, deskripsi, serta menghapus produk langsung dari Telegram.
+* **Manajemen Stok**: Mendukung pengaturan angka stok, stok tak terbatas (unlimited), serta pool stok akun unik per baris.
+* **Pesan Siaran (`/broadcast`)**: Mengirimkan pengumuman atau pesan promosi ke seluruh pengguna yang terdaftar di database.
+* **Sistem Reservasi Stok**: Mengunci stok sementara saat tagihan dibuat dan mengembalikannya otomatis jika transaksi batal atau kedaluwarsa.
+* **Verifikasi Pembayaran Ganda**: Menggabungkan Webhook FastAPI dan background worker otomatis untuk pengecekan status pembayaran tanpa keterlambatan.
 
 ---
 
