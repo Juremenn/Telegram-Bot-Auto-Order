@@ -241,42 +241,8 @@ def _build_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
-    """
-    Periksa apakah user sudah bergabung ke channel wajib (Force Sub).
-    Mengembalikan True jika:
-    - Fitur FORCE_SUB_CHANNEL dinonaktifkan / kosong
-    - User berstatus member, administrator, atau creator di channel tersebut
-    """
-    channel = getattr(config, "FORCE_SUB_CHANNEL", "").strip()
-    if not channel:
-        return True
-
-    try:
-        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
-        if member.status in ("creator", "administrator", "member"):
-            return True
-        if member.status == "restricted" and getattr(member, "is_member", False):
-            return True
-        return False
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "member list is inaccessible" in err_msg or "chat_admin_required" in err_msg:
-            logger.error(
-                "❌ PERINGATAN: Bot @sonelzbot belum diangkat menjadi Admin di channel %s! "
-                "Jadikan bot sebagai Administrator di channel agar bot bisa memeriksa keanggotaan pembeli.",
-                channel,
-            )
-            return False
-        if "user not found" in err_msg or "participant_id_invalid" in err_msg or "user_not_participant" in err_msg:
-            # User memang bukan member di channel
-            return False
-        logger.warning(
-            "Gagal memeriksa keanggotaan user %s di channel %s: %s",
-            user_id,
-            channel,
-            e,
-        )
-        return False
+    """Periksa apakah user sudah bergabung ke channel (dinonaktifkan / selalu True)."""
+    return True
 
 
 def _build_force_sub_keyboard() -> InlineKeyboardMarkup:
@@ -313,24 +279,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         full_name=user.full_name,
     )
 
-    # Cek keanggotaan channel wajib (Force Subscribe)
-    if not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        sub_text = (
-            f"👋 Halo, <b>{user.first_name}</b>!\n\n"
-            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
-            f"Sebelum dapat menggunakan bot dan melihat katalog produk, silakan bergabung ke channel resmi kami terlebih dahulu:\n\n"
-            f"👉 <b>{channel_name}</b>\n\n"
-            f"Setelah bergabung, klik tombol <b>'🔄 Saya Sudah Bergabung'</b> di bawah untuk membuka menu utama."
-        )
-        await _send_with_effect(
-            update.message,
-            text=sub_text,
-            reply_markup=_build_force_sub_keyboard(),
-            effect_id=EFFECT_FIRE,
-            photo_path=MENU_IMAGE_PATH,
-        )
-        return
 
     keyboard = _build_main_menu_keyboard(user.id)
 
@@ -352,21 +300,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /products - tampilkan daftar produk"""
-    user = update.effective_user
-    if user and not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        text = (
-            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
-            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu untuk melihat katalog produk kami."
-        )
-        await _send_with_effect(
-            update.message,
-            text=text,
-            reply_markup=_build_force_sub_keyboard(),
-            effect_id=EFFECT_FIRE,
-            photo_path=MENU_IMAGE_PATH,
-        )
-        return
     await _show_product_list(update, context, edit=False)
 
 
@@ -375,41 +308,11 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if user is None:
         return
-    if not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        text = (
-            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
-            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu."
-        )
-        await _send_with_effect(
-            update.message,
-            text=text,
-            reply_markup=_build_force_sub_keyboard(),
-            effect_id=EFFECT_FIRE,
-            photo_path=MENU_IMAGE_PATH,
-        )
-        return
     await _show_orders(update, context, telegram_id=user.id, edit=False)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /status <order_ref> - cek status pesanan tertentu"""
-    user = update.effective_user
-    if user and not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        text = (
-            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
-            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu."
-        )
-        await _send_with_effect(
-            update.message,
-            text=text,
-            reply_markup=_build_force_sub_keyboard(),
-            effect_id=EFFECT_FIRE,
-            photo_path=MENU_IMAGE_PATH,
-        )
-        return
-
     if not context.args:
         await update.message.reply_text(
             "❓ Gunakan format: <code>/status ORD-20260825-XXXX</code>",
@@ -475,19 +378,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parts = data.split(":")
     action = parts[0]
 
-    # Khusus verifikasi keanggotaan channel
+    # Khusus verifikasi keanggotaan channel jika tombol lama ditekan
     if action == "check_sub":
         await _handle_check_sub(update, context)
-        return
-
-    # Proteksi: Pembeli TIDAK boleh klik tombol apapun di bot jika belum join channel
-    user = update.effective_user
-    if user and not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        await query.answer(
-            f"⚠️ Akses ditolak!\n\nAnda belum bergabung ke channel {channel_name}.\nSilakan bergabung ke channel terlebih dahulu untuk mengakses menu!",
-            show_alert=True,
-        )
         return
 
     match action:
@@ -601,23 +494,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _handle_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler tombol verifikasi keanggotaan channel (Force Sub)."""
+    """Handler tombol verifikasi channel jika ada tombol lama tersisa."""
     query = update.callback_query
-    user = update.effective_user
-    if not query or not user:
+    if not query:
         return
-
-    is_subbed = await _is_user_subscribed(context.bot, user.id)
-    if is_subbed:
-        await query.answer("✅ Verifikasi berhasil! Selamat datang.", show_alert=False)
-        await _show_main_menu(update, context, force_new=False)
-    else:
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        await query.answer(
-            f"❌ Anda belum bergabung ke channel {channel_name}!\n\n"
-            f"Silakan klik tombol '📢 Gabung Channel' terlebih dahulu, lalu klik tombol ini lagi.",
-            show_alert=True,
-        )
+    await query.answer("✅ Selamat datang!", show_alert=False)
+    await _show_main_menu(update, context, force_new=False)
 
 
 # ── Sub-handler menu ──────────────────────────────────────────────────────────
@@ -1579,21 +1461,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not text:
         return
 
-    # Proteksi channel untuk pembeli
-    if not _is_admin(user.id) and not await _is_user_subscribed(context.bot, user.id):
-        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
-        sub_text = (
-            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n\n"
-            f"Anda harus bergabung ke channel <b>{channel_name}</b> terlebih dahulu untuk menggunakan bot ini."
-        )
-        await _send_with_effect(
-            update.message,
-            text=sub_text,
-            reply_markup=_build_force_sub_keyboard(),
-            effect_id=EFFECT_FIRE,
-            photo_path=MENU_IMAGE_PATH,
-        )
-        return
+
 
     # ── 0. Input Jumlah Pembelian oleh Pembeli (Buyer Custom QTY) ─────────────
     user_state = context.user_data.get("user_state", "")
@@ -2639,6 +2507,30 @@ async def send_payment_notification(user_db_id: int, order_ref: str, fulfillment
         logger.exception("Gagal kirim notifikasi ke user telegram_id=%s", telegram_id)
 
 
+def _get_invoice_font(family: str, size: int, bold: bool = False):
+    """Helper untuk memuat font TTF dengan fallback multi-platform yang aman."""
+    candidates = []
+    if bold:
+        candidates = [
+            f"{family}bd.ttf", f"{family}-Bold.ttf", "arialbd.ttf",
+            "segoeuib.ttf", "calibrib.ttf", "DejaVuSans-Bold.ttf", "FreeSansBold.ttf"
+        ]
+    else:
+        candidates = [
+            f"{family}.ttf", f"{family}-Regular.ttf", "arial.ttf",
+            "segoeui.ttf", "calibri.ttf", "DejaVuSans.ttf", "FreeSans.ttf"
+        ]
+    for n in candidates:
+        try:
+            return ImageFont.truetype(n, size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default(size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
 def generate_invoice_image(
     order_ref: str,
     product_name: str,
@@ -2647,106 +2539,143 @@ def generate_invoice_image(
     buyer_name: str,
     waktu_str: str,
 ) -> io.BytesIO:
-    """Generate gambar struk invoice modern & profesional menggunakan Pillow."""
-    width, height = 1000, 1000
-    img = Image.new("RGB", (width, height), color=(15, 23, 42))
+    """Generate gambar struk invoice modern, estetis, dan sangat jelas (HD 1080x1080)."""
+    width, height = 1080, 1080
+    img = Image.new("RGB", (width, height), color=(11, 17, 32))
     draw = ImageDraw.Draw(img)
 
-    # Background gradient halus
+    # 1. Background gradient vertikal halus (Deep Navy Slate)
     for y in range(height):
-        r = int(15 + (30 - 15) * (y / height))
-        g = int(23 + (27 - 23) * (y / height))
-        b = int(42 + (75 - 42) * (y / height))
+        ratio = y / height
+        r = int(10 + (22 - 10) * ratio)
+        g = int(16 + (30 - 16) * ratio)
+        b = int(30 + (56 - 30) * ratio)
         draw.line([(0, y), (width, y)], fill=(r, g, b))
 
-    # Garis aksen atas
-    draw.rectangle([0, 0, width, 12], fill=(99, 102, 241))
+    # 2. Garis aksen gradient atas
+    for x in range(width):
+        ratio = x / width
+        r = int(99 + (16 - 99) * ratio)
+        g = int(102 + (185 - 102) * ratio)
+        b = int(241 + (129 - 241) * ratio)
+        draw.line([(x, 0), (x, 10)], fill=(r, g, b))
 
-    # Font setup
-    try:
-        font_store = ImageFont.truetype("arialbd.ttf", 36)
-        font_sub = ImageFont.truetype("arial.ttf", 20)
-        font_badge = ImageFont.truetype("arialbd.ttf", 22)
-        font_prod_title = ImageFont.truetype("arialbd.ttf", 38)
-        font_label = ImageFont.truetype("arial.ttf", 24)
-        font_val = ImageFont.truetype("arialbd.ttf", 24)
-        font_total_lbl = ImageFont.truetype("arialbd.ttf", 22)
-        font_total_val = ImageFont.truetype("arialbd.ttf", 50)
-        font_footer = ImageFont.truetype("arial.ttf", 20)
-    except Exception:
-        font_store = ImageFont.load_default()
-        font_sub = font_store
-        font_badge = font_store
-        font_prod_title = font_store
-        font_label = font_store
-        font_val = font_store
-        font_total_lbl = font_store
-        font_total_val = font_store
-        font_footer = font_store
+    # 3. Setup Tipografi / Font Ukuran Besar
+    font_store_brand = _get_invoice_font("segoeui", 48, bold=True)
+    font_brand_sub   = _get_invoice_font("segoeui", 22, bold=False)
+    font_badge       = _get_invoice_font("segoeui", 24, bold=True)
+    font_hero_lbl    = _get_invoice_font("segoeui", 24, bold=True)
+    font_hero_val    = _get_invoice_font("segoeui", 68, bold=True)
+    font_verif       = _get_invoice_font("segoeui", 22, bold=True)
+    font_prod_lbl    = _get_invoice_font("segoeui", 22, bold=True)
+    font_prod_name   = _get_invoice_font("segoeui", 38, bold=True)
+    font_row_lbl     = _get_invoice_font("segoeui", 28, bold=False)
+    font_row_val     = _get_invoice_font("segoeui", 28, bold=True)
+    font_row_mono    = _get_invoice_font("consolas", 30, bold=True)
+    font_note        = _get_invoice_font("segoeui", 24, bold=False)
+    font_footer      = _get_invoice_font("segoeui", 22, bold=False)
 
-    # Header Toko & Subtitle
-    draw.text((70, 50), "SONEL STORE", fill=(255, 255, 255), font=font_store)
-    draw.text((70, 96), "BUKTI TRANSAKSI RESMI & LIVE FEED", fill=(148, 163, 184), font=font_sub)
+    # 4. Header: Nama Toko & Subtitle
+    draw.text((65, 40), "SONEL STORE", fill=(255, 255, 255), font=font_store_brand)
+    draw.text((68, 96), "OFFICIAL TRANSACTION RECEIPT", fill=(148, 163, 184), font=font_brand_sub)
 
-    # Badge Hijau Status LUNAS
-    badge_w, badge_h = 230, 46
-    badge_x, badge_y = width - 70 - badge_w, 55
+    # 5. Badge Status: PAID / LUNAS dengan titik indikator hijau
+    badge_w, badge_h = 240, 52
+    badge_x, badge_y = width - 65 - badge_w, 46
     draw.rounded_rectangle(
         [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
-        radius=23,
+        radius=26,
         fill=(16, 185, 129),
     )
-    draw.text((badge_x + 22, badge_y + 10), "● LUNAS / PAID", fill=(255, 255, 255), font=font_badge)
+    dot_cx, dot_cy, dot_r = badge_x + 30, badge_y + 26, 6
+    draw.ellipse([dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r], fill=(255, 255, 255))
+    draw.text((badge_x + 48, badge_y + 11), "LUNAS / PAID", fill=(255, 255, 255), font=font_badge)
 
-    # Kartu Utama (Container)
-    card_x1, card_y1, card_x2, card_y2 = 70, 160, width - 70, 880
+    # 6. Wadah Kartu Utama (Glassmorphic Slate Container)
+    card_x1, card_y1, card_x2, card_y2 = 65, 142, width - 65, 985
     draw.rounded_rectangle(
         [card_x1, card_y1, card_x2, card_y2],
-        radius=20,
-        fill=(30, 41, 59),
+        radius=24,
+        fill=(20, 29, 47),
         outline=(51, 65, 85),
         width=2,
     )
 
-    # Nama Produk
-    draw.text((card_x1 + 40, card_y1 + 35), "PRODUK YANG DIBELI", fill=(148, 163, 184), font=font_sub)
-    display_prod_name = product_name if len(product_name) <= 34 else product_name[:32] + "..."
-    draw.text((card_x1 + 40, card_y1 + 65), display_prod_name, fill=(248, 250, 252), font=font_prod_title)
-    draw.line([(card_x1 + 40, card_y1 + 130), (card_x2 - 40, card_y1 + 130)], fill=(51, 65, 85), width=2)
-
-    # Baris Rincian
-    rows = [
-        ("Order ID", order_ref),
-        ("Jumlah Unit", f"{qty} unit"),
-        ("Metode Pembayaran", "QRIS Real-Time (Instant)"),
-        ("Waktu Transaksi", waktu_str),
-        ("Pembeli", buyer_name),
-    ]
-
-    curr_y = card_y1 + 155
-    row_spacing = 58
-    for label, val in rows:
-        draw.text((card_x1 + 40, curr_y), label, fill=(148, 163, 184), font=font_label)
-        draw.text((card_x1 + 340, curr_y), f":  {val}", fill=(241, 245, 249), font=font_val)
-        curr_y += row_spacing
-
-    # Kotak Total Pembayaran
-    tot_box_y1 = card_y2 - 170
-    tot_box_y2 = card_y2 - 30
+    # 7. Box Hero Total Pembayaran
+    tot_x1, tot_y1, tot_x2, tot_y2 = card_x1 + 30, card_y1 + 30, card_x2 - 30, card_y1 + 200
     draw.rounded_rectangle(
-        [card_x1 + 30, tot_box_y1, card_x2 - 30, tot_box_y2],
-        radius=16,
-        fill=(15, 23, 42),
+        [tot_x1, tot_y1, tot_x2, tot_y2],
+        radius=18,
+        fill=(13, 20, 36),
         outline=(99, 102, 241),
         width=2,
     )
 
     fmt_rupiah = f"Rp {total_amount:,.0f}".replace(",", ".")
-    draw.text((card_x1 + 60, tot_box_y1 + 22), "TOTAL DIBAYAR", fill=(148, 163, 184), font=font_total_lbl)
-    draw.text((card_x1 + 60, tot_box_y1 + 55), fmt_rupiah, fill=(56, 189, 248), font=font_total_val)
-    draw.text((card_x2 - 150, tot_box_y1 + 42), "VERIFIED", fill=(16, 185, 129), font=font_badge)
+    draw.text((tot_x1 + 35, tot_y1 + 22), "TOTAL PEMBAYARAN", fill=(148, 163, 184), font=font_hero_lbl)
+    draw.text((tot_x1 + 35, tot_y1 + 62), fmt_rupiah, fill=(56, 189, 248), font=font_hero_val)
 
-    draw.text((width // 2 - 200, height - 80), "🔐 Terverifikasi Otomatis | @sonelzbot", fill=(100, 116, 139), font=font_footer)
+    # Verified Seal pill di dalam box total
+    v_w, v_h = 165, 46
+    v_x, v_y = tot_x2 - 35 - v_w, tot_y1 + 62
+    draw.rounded_rectangle(
+        [v_x, v_y, v_x + v_w, v_y + v_h],
+        radius=23,
+        fill=(6, 78, 59),
+        outline=(16, 185, 129),
+        width=2,
+    )
+    # Checkmark vector icon
+    chk_x, chk_y = v_x + 24, v_y + 24
+    draw.line([(chk_x, chk_y), (chk_x + 5, chk_y + 6)], fill=(52, 211, 153), width=3)
+    draw.line([(chk_x + 5, chk_y + 6), (chk_x + 14, chk_y - 7)], fill=(52, 211, 153), width=3)
+    draw.text((v_x + 48, v_y + 9), "VERIFIED", fill=(52, 211, 153), font=font_verif)
+
+    # 8. Bagian Nama Produk
+    prod_y = card_y1 + 235
+    draw.text((card_x1 + 40, prod_y), "PRODUK DIBELI", fill=(148, 163, 184), font=font_prod_lbl)
+    disp_name = product_name if len(product_name) <= 36 else product_name[:34] + "..."
+    draw.text((card_x1 + 40, prod_y + 36), disp_name, fill=(248, 250, 252), font=font_prod_name)
+
+    # Garis Pembatas 1
+    div1_y = prod_y + 100
+    draw.line([(card_x1 + 40, div1_y), (card_x2 - 40, div1_y)], fill=(45, 59, 80), width=2)
+
+    # 9. Tabel Rincian Transaksi
+    rows = [
+        ("Order ID", order_ref, True),
+        ("Jumlah Unit", f"{qty} Unit", False),
+        ("Metode Pembayaran", "QRIS Real-Time (Instant)", False),
+        ("Waktu Transaksi", waktu_str, False),
+        ("Pembeli", buyer_name, False),
+    ]
+
+    curr_y = div1_y + 28
+    row_spacing = 64
+    for label, val, is_mono in rows:
+        draw.text((card_x1 + 40, curr_y), label, fill=(148, 163, 184), font=font_row_lbl)
+        draw.text((card_x1 + 350, curr_y), ":", fill=(148, 163, 184), font=font_row_lbl)
+        if is_mono:
+            draw.text((card_x1 + 375, curr_y - 2), val, fill=(251, 191, 36), font=font_row_mono)
+        else:
+            draw.text((card_x1 + 375, curr_y), val, fill=(241, 245, 249), font=font_row_val)
+        curr_y += row_spacing
+
+    # Garis Pembatas 2
+    div2_y = curr_y + 10
+    draw.line([(card_x1 + 40, div2_y), (card_x2 - 40, div2_y)], fill=(45, 59, 80), width=2)
+
+    # 10. Catatan Keamanan / Instant Delivery
+    note_text = "Terverifikasi Otomatis  •  Pengiriman Instan Real-Time"
+    note_bbox = draw.textbbox((0, 0), note_text, font=font_note)
+    note_w = note_bbox[2] - note_bbox[0]
+    draw.text(((width - note_w) // 2, div2_y + 24), note_text, fill=(148, 163, 184), font=font_note)
+
+    # 11. Footer Tengah
+    footer_text = "Sonel Store Auto-Order • Transaksi Aman & Terenkripsi"
+    footer_bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
+    footer_w = footer_bbox[2] - footer_bbox[0]
+    draw.text(((width - footer_w) // 2, height - 55), footer_text, fill=(100, 116, 139), font=font_footer)
 
     bio = io.BytesIO()
     bio.name = "invoice.jpg"

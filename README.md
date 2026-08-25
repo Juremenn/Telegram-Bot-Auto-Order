@@ -1,6 +1,6 @@
-# Telegram Auto Order Bot
+# Sonel Store - Telegram Auto Order Bot
 
-Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gateway), fitur Wajib Join Channel (Force Subscribe), serta pembuatan gambar struk/invoice otomatis ke channel setiap transaksi sukses.
+Bot Telegram Toko Digital Otomatis untuk **Sonel Store** dengan sistem pembayaran QRIS Real-Time (PayKita Gateway), pengiriman instan produk digital, pembuatan gambar struk/invoice HD otomatis ke channel Telegram, serta panel manajemen produk & stok bagi Owner.
 
 ---
 
@@ -9,19 +9,19 @@ Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gat
 ### 1. Pembelian & Transaksi
 | Fitur | Deskripsi |
 |---|---|
-| **Force Subscribe** | Membatasi akses menu bot hanya untuk pengguna yang telah bergabung ke channel Telegram. |
-| **QRIS Real-Time** | Pembuatan tagihan QRIS dinamis otomatis yang mendukung seluruh e-wallet dan m-Banking. |
-| **Instant Delivery** | Pengiriman otomatis data akun, lisensi, atau produk digital ke chat pembeli setelah pembayaran lunas. |
-| **Auto-Pin Invoice** | Menyematkan pesan invoice dan detail akun secara otomatis di ruang chat pembeli. |
-| **Bulk Order** | Memungkinkan pembeli memilih atau memasukkan jumlah unit produk yang ingin dibeli. |
+| **Akses Terbuka & Cepat** | Pembeli dapat langsung mengakses bot dan melihat katalog produk tanpa syarat wajib gabung ke channel. |
+| **QRIS Real-Time** | Pembuatan tagihan QRIS dinamis otomatis yang mendukung seluruh e-wallet (GoPay, OVO, Dana, ShopeePay) dan m-Banking. |
+| **Instant Delivery** | Pengiriman otomatis data akun, lisensi, atau produk digital langsung ke chat pembeli setelah pembayaran lunas. |
+| **Auto-Pin Invoice** | Menyematkan pesan invoice dan detail akun secara otomatis di ruang chat pembeli dengan efek perayaan 🎉. |
+| **Bulk Order & Custom Qty** | Memungkinkan pembeli memilih jumlah cepat atau memasukkan jumlah unit produk kustom yang ingin dibeli. |
 | **Riwayat Pesanan** | Memudahkan pembeli mengecek riwayat dan status transaksi sebelumnya via perintah `/orders`. |
 
 ### 2. Notifikasi Channel & Promosi
 | Fitur | Deskripsi |
 |---|---|
-| **Struk Visual (JPG)** | Otomatis membuat gambar struk beresolusi tinggi (1000x1000) dan mempostingnya ke channel Telegram. |
-| **Sensor Privasi** | Menyensor username pembeli dan menjaga kerahasiaan detail akun/lisensi di channel publik. |
-| **Tombol Belanja Cepat** | Menyertakan tombol tautan langsung ke bot pada setiap postingan struk di channel. |
+| **Struk Visual HD (1080x1080)** | Otomatis membuat gambar struk beresolusi tinggi dengan tipografi jelas, kontras tinggi, dan mempostingnya ke channel Telegram. |
+| **Sensor Privasi** | Menyensor username pembeli (contoh: `@n***l`) dan menjaga kerahasiaan data akun/lisensi di channel publik. |
+| **Tombol Belanja Cepat** | Menyertakan tombol tautan langsung ke bot pada setiap postingan struk di channel Telegram. |
 
 ### 3. Pengelolaan Toko (Owner / Admin)
 | Fitur | Deskripsi |
@@ -38,7 +38,7 @@ Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gat
 
 ```text
 auto-order-bot/
-├── bot.py          # Logika utama bot (Menu, Navigasi, Force Sub, Struk Generator)
+├── bot.py          # Logika utama bot (Menu, Navigasi, Katalog, Struk Generator)
 ├── webhook.py      # Server Webhook FastAPI untuk menerima callback dari PayKita
 ├── paykita.py      # Klien REST API PayKita (Generate QRIS & cek status transaksi)
 ├── database.py     # Manajemen Database SQLite (Users, Produk, Pesanan, Stok Akun)
@@ -82,20 +82,20 @@ ORDER_EXPIRY_MINUTES=30
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Token bot yang didapatkan dari @BotFather. |
 | `ADMIN_TELEGRAM_ID` | Telegram User ID Anda sebagai owner bot (cek via @userinfobot). |
-| `FORCE_SUB_CHANNEL` | Username channel Telegram Anda (contoh: `@nelstores`). |
+| `FORCE_SUB_CHANNEL` | Username channel Telegram Anda untuk posting gambar invoice bukti transaksi (contoh: `@nelstores`). |
 | `PAYKITA_API_KEY` | API Key dari dashboard PayKita (pay.digikita.id → API Keys). |
 | `PAYKITA_WEBHOOK_SECRET` | Webhook secret dari dashboard PayKita (Settings → Webhook). |
 | `PUBLIC_URL` | Domain HTTPS server Anda untuk menerima webhook (opsional jika menggunakan auto-check). |
 
 ---
 
-## Pengaturan Channel Telegram
+## Pengaturan Channel Telegram (Live Feed Invoice)
 
-Agar fitur Wajib Join Channel dan pengiriman gambar struk dapat berjalan:
+Agar bot dapat memposting gambar struk/invoice transaksi sukses secara otomatis ke channel Telegram Anda:
 1. Buka channel Telegram Anda.
 2. Masuk ke pengaturan channel, pilih menu **Administrators**.
 3. Tambahkan bot Anda sebagai **Administrator**.
-4. Berikan izin standar (Posting pesan dan kelola anggota).
+4. Berikan izin standar (**Post Messages / Posting Pesan**).
 
 ---
 
@@ -138,7 +138,7 @@ Agar fitur Wajib Join Channel dan pengiriman gambar struk dapat berjalan:
    Isi konfigurasi service:
    ```ini
    [Unit]
-   Description=Auto Order Telegram Bot
+   Description=Sonel Store Auto Order Telegram Bot
    After=network.target
 
    [Service]
@@ -168,7 +168,7 @@ Agar fitur Wajib Join Channel dan pengiriman gambar struk dapat berjalan:
 
 | Perintah | Hak Akses | Keterangan |
 |---|---|---|
-| `/start` | Semua Pengguna | Membuka menu utama dan katalog produk (wajib join channel). |
+| `/start` | Semua Pengguna | Membuka pesan sambutan dan menu katalog produk Sonel Store. |
 | `/products` | Semua Pengguna | Menampilkan daftar produk yang tersedia. |
 | `/orders` | Semua Pengguna | Melihat riwayat transaksi pengguna. |
 | `/status <REF>` | Semua Pengguna | Mengecek status pesanan tertentu (contoh: `/status ORD-20260825-XXXX`). |
