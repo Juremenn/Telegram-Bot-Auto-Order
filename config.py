@@ -27,6 +27,7 @@ def _optional(key: str, default: str = "") -> str:
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 ADMIN_TELEGRAM_ID: int = int(_require("ADMIN_TELEGRAM_ID"))
+FORCE_SUB_CHANNEL: str = _optional("FORCE_SUB_CHANNEL", "@nelstores")
 
 # ── PayKita ───────────────────────────────────────────────────────────────────
 # API key TIDAK boleh di-log, ditampilkan, atau di-hardcode

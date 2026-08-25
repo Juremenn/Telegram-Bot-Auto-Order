@@ -18,8 +18,8 @@ import uuid
 import json
 import re
 from datetime import datetime, timezone
-
 import qrcode
+from PIL import Image, ImageDraw, ImageFont
 from telegram import (
     Update,
     Bot,
@@ -240,6 +240,57 @@ def _build_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
+    """
+    Periksa apakah user sudah bergabung ke channel wajib (Force Sub).
+    Mengembalikan True jika:
+    - Fitur FORCE_SUB_CHANNEL dinonaktifkan / kosong
+    - User berstatus member, administrator, atau creator di channel tersebut
+    """
+    channel = getattr(config, "FORCE_SUB_CHANNEL", "").strip()
+    if not channel:
+        return True
+
+    try:
+        member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
+        if member.status in ("creator", "administrator", "member"):
+            return True
+        if member.status == "restricted" and getattr(member, "is_member", False):
+            return True
+        return False
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "member list is inaccessible" in err_msg or "chat_admin_required" in err_msg:
+            logger.error(
+                "❌ PERINGATAN: Bot @sonelzbot belum diangkat menjadi Admin di channel %s! "
+                "Jadikan bot sebagai Administrator di channel agar bot bisa memeriksa keanggotaan pembeli.",
+                channel,
+            )
+            return False
+        if "user not found" in err_msg or "participant_id_invalid" in err_msg or "user_not_participant" in err_msg:
+            # User memang bukan member di channel
+            return False
+        logger.warning(
+            "Gagal memeriksa keanggotaan user %s di channel %s: %s",
+            user_id,
+            channel,
+            e,
+        )
+        return False
+
+
+def _build_force_sub_keyboard() -> InlineKeyboardMarkup:
+    """Buat keyboard untuk wajib join channel."""
+    channel = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores").strip()
+    clean_channel = channel.lstrip("@")
+    channel_url = f"https://t.me/{clean_channel}"
+    buttons = [
+        [InlineKeyboardButton(f"📢 Gabung Channel {channel}", url=channel_url)],
+        [InlineKeyboardButton("🔄 Saya Sudah Bergabung", callback_data="check_sub")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMAND HANDLERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -262,6 +313,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         full_name=user.full_name,
     )
 
+    # Cek keanggotaan channel wajib (Force Subscribe)
+    if not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        sub_text = (
+            f"👋 Halo, <b>{user.first_name}</b>!\n\n"
+            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
+            f"Sebelum dapat menggunakan bot dan melihat katalog produk, silakan bergabung ke channel resmi kami terlebih dahulu:\n\n"
+            f"👉 <b>{channel_name}</b>\n\n"
+            f"Setelah bergabung, klik tombol <b>'🔄 Saya Sudah Bergabung'</b> di bawah untuk membuka menu utama."
+        )
+        await _send_with_effect(
+            update.message,
+            text=sub_text,
+            reply_markup=_build_force_sub_keyboard(),
+            effect_id=EFFECT_FIRE,
+            photo_path=MENU_IMAGE_PATH,
+        )
+        return
+
     keyboard = _build_main_menu_keyboard(user.id)
 
     text = (
@@ -282,6 +352,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /products - tampilkan daftar produk"""
+    user = update.effective_user
+    if user and not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        text = (
+            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
+            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu untuk melihat katalog produk kami."
+        )
+        await _send_with_effect(
+            update.message,
+            text=text,
+            reply_markup=_build_force_sub_keyboard(),
+            effect_id=EFFECT_FIRE,
+            photo_path=MENU_IMAGE_PATH,
+        )
+        return
     await _show_product_list(update, context, edit=False)
 
 
@@ -290,11 +375,41 @@ async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if user is None:
         return
+    if not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        text = (
+            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
+            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu."
+        )
+        await _send_with_effect(
+            update.message,
+            text=text,
+            reply_markup=_build_force_sub_keyboard(),
+            effect_id=EFFECT_FIRE,
+            photo_path=MENU_IMAGE_PATH,
+        )
+        return
     await _show_orders(update, context, telegram_id=user.id, edit=False)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /status <order_ref> - cek status pesanan tertentu"""
+    user = update.effective_user
+    if user and not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        text = (
+            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n"
+            f"Silakan bergabung ke channel <b>{channel_name}</b> terlebih dahulu."
+        )
+        await _send_with_effect(
+            update.message,
+            text=text,
+            reply_markup=_build_force_sub_keyboard(),
+            effect_id=EFFECT_FIRE,
+            photo_path=MENU_IMAGE_PATH,
+        )
+        return
+
     if not context.args:
         await update.message.reply_text(
             "❓ Gunakan format: <code>/status ORD-20260825-XXXX</code>",
@@ -359,6 +474,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     data: str = query.data or ""
     parts = data.split(":")
     action = parts[0]
+
+    # Khusus verifikasi keanggotaan channel
+    if action == "check_sub":
+        await _handle_check_sub(update, context)
+        return
+
+    # Proteksi: Pembeli TIDAK boleh klik tombol apapun di bot jika belum join channel
+    user = update.effective_user
+    if user and not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        await query.answer(
+            f"⚠️ Akses ditolak!\n\nAnda belum bergabung ke channel {channel_name}.\nSilakan bergabung ke channel terlebih dahulu untuk mengakses menu!",
+            show_alert=True,
+        )
+        return
 
     match action:
         case "menu":
@@ -468,6 +598,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     await _handle_admin_delete_do(update, context, pid)
         case _:
             await _safe_edit_or_send_text(update, context, text="❓ Aksi tidak dikenali.")
+
+
+async def _handle_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler tombol verifikasi keanggotaan channel (Force Sub)."""
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user:
+        return
+
+    is_subbed = await _is_user_subscribed(context.bot, user.id)
+    if is_subbed:
+        await query.answer("✅ Verifikasi berhasil! Selamat datang.", show_alert=False)
+        await _show_main_menu(update, context, force_new=False)
+    else:
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        await query.answer(
+            f"❌ Anda belum bergabung ke channel {channel_name}!\n\n"
+            f"Silakan klik tombol '📢 Gabung Channel' terlebih dahulu, lalu klik tombol ini lagi.",
+            show_alert=True,
+        )
 
 
 # ── Sub-handler menu ──────────────────────────────────────────────────────────
@@ -1429,6 +1579,22 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not text:
         return
 
+    # Proteksi channel untuk pembeli
+    if not _is_admin(user.id) and not await _is_user_subscribed(context.bot, user.id):
+        channel_name = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores")
+        sub_text = (
+            f"⚠️ <b>Wajib Bergabung ke Channel</b>\n\n"
+            f"Anda harus bergabung ke channel <b>{channel_name}</b> terlebih dahulu untuk menggunakan bot ini."
+        )
+        await _send_with_effect(
+            update.message,
+            text=sub_text,
+            reply_markup=_build_force_sub_keyboard(),
+            effect_id=EFFECT_FIRE,
+            photo_path=MENU_IMAGE_PATH,
+        )
+        return
+
     # ── 0. Input Jumlah Pembelian oleh Pembeli (Buyer Custom QTY) ─────────────
     user_state = context.user_data.get("user_state", "")
     if user_state.startswith("BUY_QTY_"):
@@ -2203,6 +2369,12 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
     # BUG-02: Satu kali DB write untuk fulfillment + COMPLETED (bukan 3x update terpisah)
     db.update_order_fulfillment(order_ref, delivery)
 
+    # 📢 Kirim invoice bukti pembelian ke channel @nelstores (hanya 1x per order berkat atomic DB lock)
+    try:
+        asyncio.create_task(_send_channel_invoice(order_ref, order))
+    except Exception as err:
+        logger.warning("Gagal memicu pengiriman invoice channel untuk ref %s: %s", order_ref, err)
+
     if send_notification:
         msg = (
             f"🎉 <b>Pembayaran Berhasil!</b>\n\n"
@@ -2465,6 +2637,204 @@ async def send_payment_notification(user_db_id: int, order_ref: str, fulfillment
             )
     except Exception:
         logger.exception("Gagal kirim notifikasi ke user telegram_id=%s", telegram_id)
+
+
+def generate_invoice_image(
+    order_ref: str,
+    product_name: str,
+    qty: int,
+    total_amount: int,
+    buyer_name: str,
+    waktu_str: str,
+) -> io.BytesIO:
+    """Generate gambar struk invoice modern & profesional menggunakan Pillow."""
+    width, height = 1000, 1000
+    img = Image.new("RGB", (width, height), color=(15, 23, 42))
+    draw = ImageDraw.Draw(img)
+
+    # Background gradient halus
+    for y in range(height):
+        r = int(15 + (30 - 15) * (y / height))
+        g = int(23 + (27 - 23) * (y / height))
+        b = int(42 + (75 - 42) * (y / height))
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    # Garis aksen atas
+    draw.rectangle([0, 0, width, 12], fill=(99, 102, 241))
+
+    # Font setup
+    try:
+        font_store = ImageFont.truetype("arialbd.ttf", 36)
+        font_sub = ImageFont.truetype("arial.ttf", 20)
+        font_badge = ImageFont.truetype("arialbd.ttf", 22)
+        font_prod_title = ImageFont.truetype("arialbd.ttf", 38)
+        font_label = ImageFont.truetype("arial.ttf", 24)
+        font_val = ImageFont.truetype("arialbd.ttf", 24)
+        font_total_lbl = ImageFont.truetype("arialbd.ttf", 22)
+        font_total_val = ImageFont.truetype("arialbd.ttf", 50)
+        font_footer = ImageFont.truetype("arial.ttf", 20)
+    except Exception:
+        font_store = ImageFont.load_default()
+        font_sub = font_store
+        font_badge = font_store
+        font_prod_title = font_store
+        font_label = font_store
+        font_val = font_store
+        font_total_lbl = font_store
+        font_total_val = font_store
+        font_footer = font_store
+
+    # Header Toko & Subtitle
+    draw.text((70, 50), "SONELZ STORE", fill=(255, 255, 255), font=font_store)
+    draw.text((70, 96), "BUKTI TRANSAKSI RESMI & LIVE FEED", fill=(148, 163, 184), font=font_sub)
+
+    # Badge Hijau Status LUNAS
+    badge_w, badge_h = 230, 46
+    badge_x, badge_y = width - 70 - badge_w, 55
+    draw.rounded_rectangle(
+        [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
+        radius=23,
+        fill=(16, 185, 129),
+    )
+    draw.text((badge_x + 22, badge_y + 10), "● LUNAS / PAID", fill=(255, 255, 255), font=font_badge)
+
+    # Kartu Utama (Container)
+    card_x1, card_y1, card_x2, card_y2 = 70, 160, width - 70, 880
+    draw.rounded_rectangle(
+        [card_x1, card_y1, card_x2, card_y2],
+        radius=20,
+        fill=(30, 41, 59),
+        outline=(51, 65, 85),
+        width=2,
+    )
+
+    # Nama Produk
+    draw.text((card_x1 + 40, card_y1 + 35), "PRODUK YANG DIBELI", fill=(148, 163, 184), font=font_sub)
+    display_prod_name = product_name if len(product_name) <= 34 else product_name[:32] + "..."
+    draw.text((card_x1 + 40, card_y1 + 65), display_prod_name, fill=(248, 250, 252), font=font_prod_title)
+    draw.line([(card_x1 + 40, card_y1 + 130), (card_x2 - 40, card_y1 + 130)], fill=(51, 65, 85), width=2)
+
+    # Baris Rincian
+    rows = [
+        ("Order ID", order_ref),
+        ("Jumlah Unit", f"{qty} unit"),
+        ("Metode Pembayaran", "QRIS Real-Time (Instant)"),
+        ("Waktu Transaksi", waktu_str),
+        ("Pembeli", buyer_name),
+    ]
+
+    curr_y = card_y1 + 155
+    row_spacing = 58
+    for label, val in rows:
+        draw.text((card_x1 + 40, curr_y), label, fill=(148, 163, 184), font=font_label)
+        draw.text((card_x1 + 340, curr_y), f":  {val}", fill=(241, 245, 249), font=font_val)
+        curr_y += row_spacing
+
+    # Kotak Total Pembayaran
+    tot_box_y1 = card_y2 - 170
+    tot_box_y2 = card_y2 - 30
+    draw.rounded_rectangle(
+        [card_x1 + 30, tot_box_y1, card_x2 - 30, tot_box_y2],
+        radius=16,
+        fill=(15, 23, 42),
+        outline=(99, 102, 241),
+        width=2,
+    )
+
+    fmt_rupiah = f"Rp {total_amount:,.0f}".replace(",", ".")
+    draw.text((card_x1 + 60, tot_box_y1 + 22), "TOTAL DIBAYAR", fill=(148, 163, 184), font=font_total_lbl)
+    draw.text((card_x1 + 60, tot_box_y1 + 55), fmt_rupiah, fill=(56, 189, 248), font=font_total_val)
+    draw.text((card_x2 - 150, tot_box_y1 + 42), "VERIFIED", fill=(16, 185, 129), font=font_badge)
+
+    draw.text((width // 2 - 200, height - 80), "🔐 Terverifikasi Otomatis | @sonelzbot", fill=(100, 116, 139), font=font_footer)
+
+    bio = io.BytesIO()
+    bio.name = "invoice.jpg"
+    img.save(bio, "JPEG", quality=95)
+    bio.seek(0)
+    return bio
+
+
+async def _send_channel_invoice(order_ref: str, order) -> None:
+    """
+    Kirim invoice / struk transaksi sukses beserta gambar JPG ke channel Telegram (@nelstores).
+    Otomatis menyensor username pembeli dan menjaga privasi detail akun/lisensi.
+    """
+    channel = getattr(config, "FORCE_SUB_CHANNEL", "@nelstores").strip()
+    if not channel:
+        return
+
+    bot_instance = _app.bot if _app is not None else Bot(token=config.TELEGRAM_BOT_TOKEN)
+
+    try:
+        product = db.get_product(order["product_id"])
+        prod_name = product["name"] if product else "Produk"
+        qty = order["qty"] if ("qty" in order.keys() and order["qty"]) else 1
+        total_amount = (order["final_amount"] if "final_amount" in order.keys() else None) or (order["base_amount"] if "base_amount" in order.keys() else 0) or 0
+        created_at = order["created_at"] if "created_at" in order.keys() else ""
+        if created_at and len(created_at) >= 19:
+            waktu_str = created_at[:19]
+        else:
+            waktu_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Ambil data buyer dari DB
+        buyer_text = "Pelanggan Setia"
+        with db.get_db() as conn:
+            user_row = conn.execute("SELECT full_name, username FROM users WHERE id = ?", (order["user_id"],)).fetchone()
+            if user_row:
+                if user_row["username"]:
+                    uname = user_row["username"]
+                    if len(uname) > 2:
+                        masked = uname[0] + "***" + uname[-1]
+                    else:
+                        masked = uname[0] + "***"
+                    buyer_text = f"@{masked}"
+                elif user_row["full_name"]:
+                    fname = user_row["full_name"]
+                    buyer_text = fname[:15]
+
+        qty_str = f"{qty} unit" if qty > 1 else "1 unit"
+
+        invoice_text = (
+            f"🧾 <b>INVOICE PEMBELIAN BERHASIL</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 <b>Order ID:</b> <code>{order_ref}</code>\n"
+            f"📦 <b>Produk:</b> {prod_name}\n"
+            f"🔢 <b>Jumlah:</b> {qty_str}\n"
+            f"💰 <b>Total Bayar:</b> <b>{_fmt_rupiah(total_amount)}</b>\n"
+            f"💳 <b>Metode:</b> QRIS Real-Time\n"
+            f"👤 <b>Pembeli:</b> {buyer_text}\n"
+            f"📅 <b>Waktu:</b> {waktu_str}\n"
+            f"📊 <b>Status:</b> ✅ <b>PAID / LUNAS</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✨ <i>Pesanan telah diproses & dikirim otomatis oleh bot.</i>\n"
+            f"🛍️ <i>Mau order juga? Klik tombol di bawah:</i>"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛒 Beli Sekarang via Bot", url="https://t.me/sonelzbot")]
+        ])
+
+        # Generate gambar struk JPG otomatis
+        photo_bio = generate_invoice_image(
+            order_ref=order_ref,
+            product_name=prod_name,
+            qty=qty,
+            total_amount=total_amount,
+            buyer_name=buyer_text,
+            waktu_str=f"{waktu_str} WIB",
+        )
+
+        await bot_instance.send_photo(
+            chat_id=channel,
+            photo=photo_bio,
+            caption=invoice_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info("Foto Invoice order %s berhasil diposting ke channel %s", order_ref, channel)
+    except Exception as e:
+        logger.exception("Gagal mengirim foto invoice order %s ke channel %s: %s", order_ref, channel, e)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
