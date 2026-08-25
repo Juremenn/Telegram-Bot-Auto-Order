@@ -1,0 +1,2 @@
+# Folder ini digunakan untuk menyimpan file database SQLite (orders.db).
+# File .db tidak di-commit ke git (sudah di .gitignore).
