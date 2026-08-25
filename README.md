@@ -1,225 +1,178 @@
-# AutoOrderBot
+# Telegram Auto Order Bot
 
-> **Stack:** Python 3.12+, python-telegram-bot, FastAPI, uvicorn, httpx, SQLite  
-> **Payment:** PayKita (pay.digikita.id)
+Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gateway), fitur Wajib Join Channel (Force Subscribe), serta pembuatan gambar struk/invoice otomatis ke channel setiap transaksi sukses.
 
 ---
 
-## Struktur Project
+## Fitur Utama
 
-```
+### Pengalaman Pembeli
+* **Wajib Join Channel (Force Subscribe)**: Pengunjung wajib bergabung ke channel Telegram Anda sebelum dapat mengakses menu belanja dan melihat katalog produk.
+* **Pembayaran QRIS Real-Time**: Tagihan QRIS dinamis langsung muncul di chat Telegram. Mendukung pembayaran dari seluruh e-wallet (GoPay, OVO, Dana, ShopeePay, LinkAja) dan m-Banking (BCA, Mandiri, BRI, BNI, dll).
+* **Pengiriman Instan (Instant Delivery)**: Akun, lisensi, atau produk digital langsung dikirimkan ke pembeli otomatis setelah pembayaran terverifikasi.
+* **Auto-Pin Pesan**: Invoice dan data akun otomatis di-pin di ruang chat pembeli agar mudah ditemukan.
+* **Pilihan Jumlah Pembelian (Bulk Order)**: Pembeli dapat memilih jumlah unit yang ingin dibeli secara fleksibel.
+* **Riwayat Pesanan (`/orders`)**: Pembeli dapat mengecek riwayat pesanan mereka kapan saja.
+
+### Notifikasi Channel & Promosi
+* **Auto Generate Gambar Struk (JPG HD)**: Bot otomatis membuat gambar struk beresolusi tinggi (1000x1000) dan mempostingnya ke channel Telegram sebagai bukti transaksi sukses.
+* **Proteksi Privasi Pembeli**: Username pembeli disensor otomatis dan data akun/lisensi pembeli tetap privat (tidak dikirim ke channel publik).
+* **Tombol Beli di Channel**: Dilengkapi tombol tautan langsung ke bot untuk mempermudah anggota channel melakukan pembelian berikutnya.
+
+### Panel Owner / Admin
+* **Panel Kontrol Produk (`/admin`)**:
+  * Tambah produk baru (nama, deskripsi, harga, stok, pesan pengiriman).
+  * Edit data produk (nama, deskripsi, harga, info akun).
+  * Pengaturan stok cepat (tambah, kurangi, kosongkan, atau set Unlimited).
+  * Manajemen stok akun unik (Account Pool) untuk mendistribusikan akun berbeda per pembeli.
+* **Kirim Pesan Broadcast (`/broadcast`)**: Mengirim pengumuman atau promosi ke seluruh database pengguna bot.
+* **Keamanan Stok & Anti-Duplikasi**: Reservasi stok otomatis saat order dibuat dan dikembalikan jika pembayaran kedaluwarsa atau dibatalkan.
+* **Sistem Verifikasi Ganda**: Menggunakan Webhook FastAPI dan background worker otomatis untuk memastikan status pembayaran terdeteksi tanpa jeda.
+
+---
+
+## Struktur File
+
+```text
 auto-order-bot/
-├── bot.py          # Telegram bot (mode polling)
-├── webhook.py      # FastAPI webhook receiver dari PayKita
-├── paykita.py      # Klien REST API PayKita
-├── database.py     # SQLite: users, products, orders
-├── config.py       # Loader .env
-├── requirements.txt
-├── .env.example
+├── bot.py          # Logika utama bot (Menu, Navigasi, Force Sub, Struk Generator)
+├── webhook.py      # Server Webhook FastAPI untuk menerima callback dari PayKita
+├── paykita.py      # Klien REST API PayKita (Generate QRIS & cek status transaksi)
+├── database.py     # Manajemen Database SQLite (Users, Produk, Pesanan, Stok Akun)
+├── config.py       # Loader konfigurasi dari file .env
+├── requirements.txt# Daftar dependensi Python
+├── .env.example    # Template konfigurasi environment
+├── menu.png        # Banner menu utama bot
 └── data/
-    └── orders.db   # Dibuat otomatis
+    └── orders.db   # File database SQLite (dibuat otomatis)
 ```
 
 ---
 
-## 1. Persiapan Server Ubuntu
+## Konfigurasi (.env)
 
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3.12 python3.12-venv python3.12-dev \
-     git curl nginx certbot python3-certbot-nginx
+Salin file `.env.example` menjadi `.env` lalu sesuaikan nilainya:
+
+```env
+# Telegram
+TELEGRAM_BOT_TOKEN=TokenBotKamu
+ADMIN_TELEGRAM_ID=OwnerIDKamu
+FORCE_SUB_CHANNEL=@ChannelKamu
+
+# PayKita Payment Gateway
+PAYKITA_API_KEY=pk_live_YOUR_API_KEY
+PAYKITA_BASE_URL=https://pay.digikita.id/api
+PAYKITA_WEBHOOK_SECRET=
+
+# Webhook Server & Domain
+WEBHOOK_HOST=0.0.0.0
+WEBHOOK_PORT=8000
+PUBLIC_URL=https://yourdomain.com
+
+# Pengaturan Tambahan
+DB_PATH=data/orders.db
+ORDER_EXPIRY_MINUTES=30
 ```
 
----
-
-## 2. Upload & Setup Project
-
-```bash
-# Buat direktori
-sudo mkdir -p /opt/autoorderbot
-sudo chown $USER:$USER /opt/autoorderbot
-cd /opt/autoorderbot
-
-# Copy semua file ke sini (via scp, git clone, dsb.)
-
-# Buat virtual environment
-python3.12 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
----
-
-## 3. Konfigurasi .env
-
-```bash
-cp .env.example .env
-nano .env
-chmod 600 .env   # Amankan file
-```
-
-| Variable | Keterangan |
+### Penjelasan Variabel:
+| Variabel | Deskripsi |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Dari @BotFather |
-| `ADMIN_TELEGRAM_ID` | ID Telegram Anda (chat @userinfobot) |
-| `PAYKITA_API_KEY` | Dari dashboard pay.digikita.id → API Keys |
-| `PAYKITA_WEBHOOK_SECRET` | Dari dashboard PayKita → Settings → Webhook |
-| `PUBLIC_URL` | Domain HTTPS Anda (misal `https://bot.domain.com`) |
+| `TELEGRAM_BOT_TOKEN` | Token bot yang didapatkan dari @BotFather. |
+| `ADMIN_TELEGRAM_ID` | Telegram User ID Anda sebagai owner bot (cek via @userinfobot). |
+| `FORCE_SUB_CHANNEL` | Username channel Telegram Anda (contoh: `@nelstores`). |
+| `PAYKITA_API_KEY` | API Key dari dashboard PayKita (pay.digikita.id → API Keys). |
+| `PAYKITA_WEBHOOK_SECRET` | Webhook secret dari dashboard PayKita (Settings → Webhook). |
+| `PUBLIC_URL` | Domain HTTPS server Anda untuk menerima webhook (opsional jika menggunakan auto-check). |
 
 ---
 
-## 4. Nginx + HTTPS
+## Pengaturan Channel Telegram
 
-```bash
-sudo nano /etc/nginx/sites-available/autoorderbot
-```
-
-```nginx
-server {
-    listen 80;
-    server_name yourdomain.com;
-
-    location /webhook/ {
-        proxy_pass         http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_pass_request_headers on;
-        client_max_body_size 1m;
-    }
-
-    location /health {
-        proxy_pass http://127.0.0.1:8000;
-    }
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/autoorderbot /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-sudo certbot --nginx -d yourdomain.com
-```
-
-Webhook URL Anda: `https://yourdomain.com/webhook/paykita`
+Agar fitur Wajib Join Channel dan pengiriman gambar struk dapat berjalan:
+1. Buka channel Telegram Anda.
+2. Masuk ke pengaturan channel, pilih menu **Administrators**.
+3. Tambahkan bot Anda sebagai **Administrator**.
+4. Berikan izin standar (Posting pesan dan kelola anggota).
 
 ---
 
-## 5. Systemd Services
+## Panduan Menjalankan Bot
 
-### Bot (Telegram polling)
+### 1. Menjalankan di Komputer Lokal (Windows / Mac / Linux)
 
-```bash
-sudo nano /etc/systemd/system/autoorderbot-bot.service
-```
-
-```ini
-[Unit]
-Description=AutoOrderBot Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/autoorderbot
-Environment="PATH=/opt/autoorderbot/venv/bin"
-ExecStart=/opt/autoorderbot/venv/bin/python bot.py
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Webhook (FastAPI)
-
-```bash
-sudo nano /etc/systemd/system/autoorderbot-webhook.service
-```
-
-```ini
-[Unit]
-Description=AutoOrderBot Webhook Server
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/autoorderbot
-Environment="PATH=/opt/autoorderbot/venv/bin"
-ExecStart=/opt/autoorderbot/venv/bin/uvicorn webhook:app --host 127.0.0.1 --port 8000 --workers 1
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Aktifkan service
-
-```bash
-sudo chown -R www-data:www-data /opt/autoorderbot
-sudo systemctl daemon-reload
-sudo systemctl enable autoorderbot-bot autoorderbot-webhook
-sudo systemctl start autoorderbot-bot autoorderbot-webhook
-sudo systemctl status autoorderbot-bot autoorderbot-webhook
-```
+1. Pasang dependensi yang diperlukan:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Jalankan bot:
+   ```bash
+   python bot.py
+   ```
 
 ---
 
-## 6. Monitoring Log
+### 2. Menjalankan di Server VPS (Ubuntu / Debian)
 
-```bash
-sudo journalctl -u autoorderbot-bot -f
-sudo journalctl -u autoorderbot-webhook -f
-```
+1. Perbarui sistem dan pasang dependensi:
+   ```bash
+   sudo apt update && sudo apt upgrade -y
+   sudo apt install -y python3 python3-venv python3-pip git curl
+   ```
+
+2. Buat virtual environment:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. Buat service systemd agar bot berjalan di latar belakang:
+   ```bash
+   sudo nano /etc/systemd/system/telegram-bot.service
+   ```
+
+   Isi konfigurasi service:
+   ```ini
+   [Unit]
+   Description=Auto Order Telegram Bot
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=root
+   WorkingDirectory=/path/ke/auto-order-bot
+   Environment="PATH=/path/ke/auto-order-bot/venv/bin"
+   ExecStart=/path/ke/auto-order-bot/venv/bin/python bot.py
+   Restart=always
+   RestartSec=5
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+4. Aktifkan dan jalankan service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable telegram-bot
+   sudo systemctl start telegram-bot
+   sudo systemctl status telegram-bot
+   ```
 
 ---
 
-## 7. Registrasi Webhook di PayKita
+## Daftar Perintah (Commands)
 
-1. Login ke [pay.digikita.id](https://pay.digikita.id)
-2. Buka **Settings → Webhook**
-3. Isi URL: `https://yourdomain.com/webhook/paykita`
-4. Salin **Webhook Secret** → isi ke `.env` sebagai `PAYKITA_WEBHOOK_SECRET`
-5. Catat nama **header signature** yang digunakan PayKita
-6. Update konstanta `SIGNATURE_HEADER` di `webhook.py` jika berbeda dari `x-signature`
-
----
-
-## 8. Perintah Berguna
-
-```bash
-# Restart setelah update kode
-sudo systemctl restart autoorderbot-bot autoorderbot-webhook
-
-# Cek database
-sqlite3 /opt/autoorderbot/data/orders.db ".tables"
-sqlite3 /opt/autoorderbot/data/orders.db \
-  "SELECT order_ref, status, base_amount, created_at FROM orders ORDER BY created_at DESC LIMIT 10;"
-
-# Test health endpoint
-curl https://yourdomain.com/health
-```
+| Perintah | Hak Akses | Keterangan |
+|---|---|---|
+| `/start` | Semua Pengguna | Membuka menu utama dan katalog produk (wajib join channel). |
+| `/products` | Semua Pengguna | Menampilkan daftar produk yang tersedia. |
+| `/orders` | Semua Pengguna | Melihat riwayat transaksi pengguna. |
+| `/status <REF>` | Semua Pengguna | Mengecek status pesanan tertentu (contoh: `/status ORD-20260825-XXXX`). |
+| `/admin` | Owner Only | Membuka panel pengelolaan produk, stok, dan akun pool. |
+| `/broadcast <pesan>` | Owner Only | Mengirimkan pesan siaran ke seluruh pengguna bot. |
 
 ---
 
-## 9. TODO setelah Setup
-
-- [ ] Isi semua nilai `.env` termasuk `PAYKITA_WEBHOOK_SECRET`
-- [ ] Konfirmasi nama header signature PayKita → update `SIGNATURE_HEADER` di `webhook.py`
-- [ ] Daftarkan webhook URL ke dashboard PayKita
-- [ ] Ganti logika fulfillment di `webhook.py` → fungsi `_run_fulfillment()`
-- [ ] Edit produk di database (`INSERT INTO products ...`) sesuai bisnis Anda
-- [ ] Test end-to-end: buat order → bayar QRIS → terima notifikasi Telegram
+## Bantuan
+Jika membutuhkan bantuan lebih lanjut atau kustomisasi, silakan hubungi owner melalui Telegram.
