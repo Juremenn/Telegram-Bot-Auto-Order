@@ -336,7 +336,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     text = (
         f"👋 Halo, <b>{user.first_name}</b>!\n\n"
-        f"Selamat datang di <b>Sonelz Store</b>.\n"
+        f"Selamat datang di <b>Sonel Store</b>.\n"
         f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
     )
 
@@ -858,7 +858,7 @@ async def _show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, fo
     keyboard = _build_main_menu_keyboard(user.id if user else 0)
     text = (
         f"👋 Halo, <b>{user.first_name if user else 'Kak'}</b>!\n\n"
-        f"Selamat datang di <b>Sonelz Store</b>.\n"
+        f"Selamat datang di <b>Sonel Store</b>.\n"
         f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
     )
     query = update.callback_query
@@ -1944,7 +1944,7 @@ async def _show_product_list(
         return
 
     text_lines = [
-        "🛍️ <b>Katalog Produk Sonelz Store</b>",
+        "🛍️ <b>Katalog Produk Sonel Store</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
     ]
     buttons = []
@@ -2221,7 +2221,7 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
                         f"📅 <b>Waktu:</b> {order['created_at'][:19]}\n\n"
                         f"📬 <b>Detail Akun / Lisensi:</b>\n"
                         f"<code>{delivery_text or 'Pesanan Anda telah berhasil diproses.'}</code>\n\n"
-                        f"<i>Terima kasih telah berbelanja di Sonelz Store!</i>"
+                        f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
                     )
                     buttons = [
                         [InlineKeyboardButton("🛍️ Beli Produk Lain", callback_data="menu:products:new")],
@@ -2384,7 +2384,7 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
             f"✅ <b>Status:</b> PAID (SELESAI)\n\n"
             f"📬 <b>Detail Akun / Lisensi:</b>\n"
             f"<code>{delivery}</code>\n\n"
-            f"<i>Terima kasih telah berbelanja di Sonelz Store!</i>"
+            f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
         )
         await send_payment_notification(order["user_id"], order_ref, msg)
 
@@ -2440,7 +2440,7 @@ async def _show_order_detail(
             f"📅 <b>Waktu:</b> {order['created_at'][:19]}\n\n"
             f"📬 <b>Detail Akun / Lisensi:</b>\n"
             f"<code>{delivery_text}</code>\n\n"
-            f"<i>Terima kasih telah berbelanja di Sonelz Store!</i>"
+            f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
         )
         buttons = [
             [InlineKeyboardButton("🛍️ Beli Produk Lain", callback_data="menu:products:new")],
@@ -2685,7 +2685,7 @@ def generate_invoice_image(
         font_footer = font_store
 
     # Header Toko & Subtitle
-    draw.text((70, 50), "SONELZ STORE", fill=(255, 255, 255), font=font_store)
+    draw.text((70, 50), "SONEL STORE", fill=(255, 255, 255), font=font_store)
     draw.text((70, 96), "BUKTI TRANSAKSI RESMI & LIVE FEED", fill=(148, 163, 184), font=font_sub)
 
     # Badge Hijau Status LUNAS
