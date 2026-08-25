@@ -1,4 +1,4 @@
-# AutoOrderBot – Panduan Deployment VPS Ubuntu
+# AutoOrderBot
 
 > **Stack:** Python 3.12+, python-telegram-bot, FastAPI, uvicorn, httpx, SQLite  
 > **Payment:** PayKita (pay.digikita.id)
