@@ -7,24 +7,30 @@ Bot Telegram Toko Digital Otomatis dengan pembayaran QRIS Real-Time (PayKita Gat
 ## Fitur Utama
 
 ### 1. Pembelian & Transaksi
-* **Force Subscribe**: Membatasi akses menu bot hanya untuk pengguna yang telah bergabung ke channel Telegram yang ditentukan.
-* **QRIS Real-Time**: Pembuatan tagihan QRIS dinamis secara otomatis yang dapat dibayar melalui seluruh e-wallet dan m-Banking.
-* **Pengiriman Otomatis (Instant Delivery)**: Mengirimkan data akun, lisensi, atau file digital langsung ke pembeli setelah status pembayaran terkonfirmasi lunas.
-* **Auto-Pin Invoice**: Menyematkan pesan invoice dan detail akun secara otomatis di ruang obrolan pembeli.
-* **Pilihan Jumlah (Bulk Order)**: Memungkinkan pembeli memilih atau memasukkan jumlah unit produk yang ingin dibeli.
-* **Riwayat Pesanan**: Memudahkan pembeli melacak riwayat dan status transaksi melalui perintah `/orders`.
+| Fitur | Deskripsi |
+|---|---|
+| **Force Subscribe** | Membatasi akses menu bot hanya untuk pengguna yang telah bergabung ke channel Telegram. |
+| **QRIS Real-Time** | Pembuatan tagihan QRIS dinamis otomatis yang mendukung seluruh e-wallet dan m-Banking. |
+| **Instant Delivery** | Pengiriman otomatis data akun, lisensi, atau produk digital ke chat pembeli setelah pembayaran lunas. |
+| **Auto-Pin Invoice** | Menyematkan pesan invoice dan detail akun secara otomatis di ruang chat pembeli. |
+| **Bulk Order** | Memungkinkan pembeli memilih atau memasukkan jumlah unit produk yang ingin dibeli. |
+| **Riwayat Pesanan** | Memudahkan pembeli mengecek riwayat dan status transaksi sebelumnya via perintah `/orders`. |
 
 ### 2. Notifikasi Channel & Promosi
-* **Auto Generate Struk Visual (JPG)**: Membuat gambar struk transaksi secara dinamis (1000x1000) dan mempostingnya ke channel sebagai bukti transaksi sukses.
-* **Sensor Privasi**: Menyensor username pembeli dan menyembunyikan detail akun/lisensi agar keamanan data pembeli tetap terjaga di channel publik.
-* **Tombol Belanja Cepat**: Menyertakan tombol tautan langsung ke bot pada setiap postingan struk di channel.
+| Fitur | Deskripsi |
+|---|---|
+| **Struk Visual (JPG)** | Otomatis membuat gambar struk beresolusi tinggi (1000x1000) dan mempostingnya ke channel Telegram. |
+| **Sensor Privasi** | Menyensor username pembeli dan menjaga kerahasiaan detail akun/lisensi di channel publik. |
+| **Tombol Belanja Cepat** | Menyertakan tombol tautan langsung ke bot pada setiap postingan struk di channel. |
 
 ### 3. Pengelolaan Toko (Owner / Admin)
-* **Panel Kontrol Produk (`/admin`)**: Menambah, mengubah nama, harga, deskripsi, serta menghapus produk langsung dari Telegram.
-* **Manajemen Stok**: Mendukung pengaturan angka stok, stok tak terbatas (unlimited), serta pool stok akun unik per baris.
-* **Pesan Siaran (`/broadcast`)**: Mengirimkan pengumuman atau pesan promosi ke seluruh pengguna yang terdaftar di database.
-* **Sistem Reservasi Stok**: Mengunci stok sementara saat tagihan dibuat dan mengembalikannya otomatis jika transaksi batal atau kedaluwarsa.
-* **Verifikasi Pembayaran Ganda**: Menggabungkan Webhook FastAPI dan background worker otomatis untuk pengecekan status pembayaran tanpa keterlambatan.
+| Fitur | Deskripsi |
+|---|---|
+| **Panel Produk (`/admin`)** | Menambah, mengubah nama, harga, deskripsi, serta menghapus produk langsung dari Telegram. |
+| **Manajemen Stok** | Mendukung pengaturan angka stok, stok tak terbatas (Unlimited), serta pool stok akun unik per baris. |
+| **Pesan Siaran (`/broadcast`)** | Mengirimkan pengumuman atau pesan promosi ke seluruh pengguna yang terdaftar di database. |
+| **Sistem Reservasi Stok** | Mengunci stok saat tagihan dibuat dan mengembalikannya otomatis jika transaksi batal atau kedaluwarsa. |
+| **Verifikasi Pembayaran Ganda** | Kombinasi Webhook FastAPI dan background worker otomatis untuk pengecekan status tanpa jeda. |
 
 ---
 
