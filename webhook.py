@@ -32,9 +32,14 @@ app = FastAPI(
 )
 
 # ── Konstanta ─────────────────────────────────────────────────────────────────
-# TODO: Ganti dengan nama header signature yang sesuai dari dokumentasi PayKita
-#       Cek di dashboard PayKita → Settings → Webhook
-SIGNATURE_HEADER = "x-signature"
+# Daftar kemungkinan nama header signature dari webhook PayKita
+SIGNATURE_HEADERS = [
+    "x-signature",
+    "x-paykita-signature",
+    "x-hub-signature-256",
+    "signature",
+    "paykita-signature",
+]
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -61,22 +66,19 @@ async def webhook_paykita(request: Request) -> JSONResponse:
     Menerima notifikasi pembayaran dari PayKita.
 
     PayKita mengirim POST request dengan:
-    - Header: signature HMAC-SHA256 (nama header lihat TODO di atas)
+    - Header: signature HMAC-SHA256
     - Body  : JSON dengan informasi order yang berubah status
-
-    Struktur payload (berdasarkan dokumentasi PayKita):
-    {
-        "id"       : "<paykita_order_id>",
-        "reference": "<order_ref>",
-        "status"   : "PAID",
-        ...
-    }
     """
     # 1. Baca raw body SEBELUM parse JSON (penting untuk kalkulasi HMAC)
     raw_body = await request.body()
 
-    # 2. Ambil signature dari header
-    sig_value = request.headers.get(SIGNATURE_HEADER, "")
+    # 2. Ambil signature dari header (cek semua variasi umum)
+    sig_value = ""
+    for h in SIGNATURE_HEADERS:
+        val = request.headers.get(h)
+        if val:
+            sig_value = val
+            break
 
     # 3. Verifikasi HMAC-SHA256
     if not paykita.verify_webhook_signature(raw_body, sig_value):

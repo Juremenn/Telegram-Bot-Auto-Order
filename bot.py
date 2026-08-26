@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 """
 bot.py - Telegram Bot menggunakan python-telegram-bot v20+
 
 Handler:
   /start         - Sambutan + menu utama
   /products      - Daftar produk
-  /orders        - Riwayat pesanan
   /status <ref>  - Cek status pesanan
   Callback query - Navigasi menu, detail produk, pembelian
 """
@@ -17,6 +18,8 @@ import logging
 import uuid
 import json
 import re
+import html
+from typing import Any, Optional, Union
 from datetime import datetime, timezone
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
@@ -26,6 +29,8 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
 )
 from telegram.ext import (
     Application,
@@ -46,6 +51,81 @@ logger = logging.getLogger(__name__)
 # Referensi global ke Application (dipakai oleh webhook.py)
 _app: Application | None = None
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Terminal ANSI Colors & Beautiful Logger ───────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Aktifkan VT100 ANSI sequences di Windows console
+if sys.platform == "win32":
+    os.system("")
+
+C_RESET   = "\033[0m"
+C_BOLD    = "\033[1m"
+C_DIM     = "\033[2m"
+C_CYAN    = "\033[96m"
+C_GREEN   = "\033[92m"
+C_YELLOW  = "\033[93m"
+C_RED     = "\033[91m"
+C_MAGENTA = "\033[95m"
+C_BLUE    = "\033[94m"
+C_WHITE   = "\033[97m"
+
+def _user_tag(user) -> str:
+    """Format string identitas pengguna: @username (ID) atau FullName (ID)."""
+    if not user:
+        return "Unknown"
+    uname = f"@{user.username}" if user.username else user.full_name
+    return f"{uname} ({user.id})"
+
+def log_customer(user, message: str) -> None:
+    """Log aksi/pesan dari Customer."""
+    now = datetime.now().strftime("%H:%M:%S")
+    u_str = _user_tag(user)
+    print(f"{C_DIM}{now}{C_RESET} {C_CYAN}{C_BOLD}[👤 CUSTOMER]{C_RESET} {C_WHITE}{u_str}{C_RESET}: {message}")
+
+def log_admin(user, message: str) -> None:
+    """Log aksi/perintah dari Admin/Owner."""
+    now = datetime.now().strftime("%H:%M:%S")
+    u_str = _user_tag(user)
+    print(f"{C_DIM}{now}{C_RESET} {C_MAGENTA}{C_BOLD}[👑 ADMIN]{C_RESET} {C_WHITE}{u_str}{C_RESET}: {message}")
+
+def log_order(message: str) -> None:
+    """Log pembuatan pesanan."""
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"{C_DIM}{now}{C_RESET} {C_YELLOW}{C_BOLD}[🛍️ ORDER]{C_RESET} {message}")
+
+def log_payment(message: str) -> None:
+    """Log pembayaran berhasil."""
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"{C_DIM}{now}{C_RESET} {C_GREEN}{C_BOLD}[💳 PAYMENT]{C_RESET} {message}")
+
+def log_invoice(message: str) -> None:
+    """Log struk/invoice dikirim ke channel."""
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"{C_DIM}{now}{C_RESET} {C_BLUE}{C_BOLD}[📢 INVOICE]{C_RESET} {message}")
+
+def log_error(title: str, detail: str | Exception = "") -> None:
+    """Log error yang mencolok dan jelas."""
+    now = datetime.now().strftime("%H:%M:%S")
+    print(f"{C_DIM}{now}{C_RESET} {C_RED}{C_BOLD}[❌ ERROR]{C_RESET} {C_RED}{title}{C_RESET} {C_DIM}{detail}{C_RESET}")
+
+def print_startup_banner() -> None:
+    """Tampilkan banner startup yang keren di terminal."""
+    banner = f"""
+{C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════════════════╗
+║              ⚡ SONEL STORE AUTO-ORDER BOT ⚡                ║
+║                 Real-Time QRIS PayKita v2.0                  ║
+╚══════════════════════════════════════════════════════════════╝{C_RESET}
+{C_DIM}┌──────────────────────────────────────────────────────────────┐{C_RESET}
+  {C_GREEN}●{C_RESET} {C_BOLD}Status Bot{C_RESET}    : {C_GREEN}Active & Listening (Polling){C_RESET}
+  {C_MAGENTA}👑{C_RESET} {C_BOLD}Owner ID{C_RESET}      : {C_WHITE}{config.ADMIN_TELEGRAM_ID}{C_RESET}
+  {C_BLUE}📢{C_RESET} {C_BOLD}Channel{C_RESET}       : {C_CYAN}{config.FORCE_SUB_CHANNEL}{C_RESET}
+  {C_YELLOW}💾{C_RESET} {C_BOLD}Database{C_RESET}      : {C_WHITE}{config.DB_PATH}{C_RESET}
+  {C_GREEN}💳{C_RESET} {C_BOLD}Gateway{C_RESET}       : {C_GREEN}PayKita QRIS Dynamic{C_RESET}
+{C_DIM}└──────────────────────────────────────────────────────────────┘{C_RESET}
+"""
+    print(banner)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Telegram Message Effects & Banner Assets ──────────────────────────────────
@@ -55,10 +135,10 @@ MENU_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "menu.png")
 
 
 async def _send_with_effect(
-    bot_or_msg,
+    bot_or_msg: Any,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
-    parse_mode: str = ParseMode.HTML,
+    parse_mode: str | ParseMode = ParseMode.HTML,
     effect_id: str | None = None,
     chat_id: int | None = None,
     photo_path: str | None = None,
@@ -123,10 +203,10 @@ def generate_qris_image(qris_string: str) -> io.BytesIO:
     )
     qr.add_data(qris_string)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     bio = io.BytesIO()
-    bio.name = "QRIS.jpg"
-    img.save(bio, "JPEG")
+    bio.name = "QRIS.png"
+    img.save(bio, "PNG")
     bio.seek(0)
     return bio
 
@@ -184,8 +264,17 @@ async def _safe_edit_or_send_text(
             return
 
         try:
-            if query.message.animation or query.message.photo:
-                await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            if query.message.photo or query.message.animation:
+                try:
+                    await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+                except Exception:
+                    # Fallback: kirim pesan baru jika caption tidak bisa di-edit
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                    )
             else:
                 await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         except Exception as err:
@@ -232,7 +321,7 @@ def _is_admin(user_id: int) -> bool:
 def _build_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Buat keyboard menu utama yang rapi dan compact."""
     buttons = [
-        [InlineKeyboardButton("🛍️ Katalog Produk", callback_data="menu:products")],
+        [InlineKeyboardButton("🛍️ Produk", callback_data="menu:products")],
         [InlineKeyboardButton("ℹ️ Bantuan", callback_data="menu:help")],
     ]
     if _is_admin(user_id):
@@ -267,6 +356,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user is None:
         return
 
+    if _is_admin(user.id):
+        log_admin(user, "Menjalankan perintah /start")
+    else:
+        log_customer(user, "Membuka bot (/start)")
+
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     except Exception:
@@ -282,8 +376,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     keyboard = _build_main_menu_keyboard(user.id)
 
+    first_name_esc = html.escape(user.first_name) if user.first_name else "Kak"
     text = (
-        f"👋 Halo, <b>{user.first_name}</b>!\n\n"
+        f"👋 Halo, <b>{first_name_esc}</b>!\n\n"
         f"Selamat datang di <b>Sonel Store</b>.\n"
         f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
     )
@@ -300,19 +395,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /products - tampilkan daftar produk"""
-    await _show_product_list(update, context, edit=False)
-
-
-async def cmd_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler /orders - tampilkan riwayat pesanan"""
     user = update.effective_user
-    if user is None:
-        return
-    await _show_orders(update, context, telegram_id=user.id, edit=False)
+    if user:
+        log_customer(user, "Melihat daftar produk (/products)")
+    await _show_product_list(update, context, edit=False)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /status <order_ref> - cek status pesanan tertentu"""
+    user = update.effective_user
     if not context.args:
         await update.message.reply_text(
             "❓ Gunakan format: <code>/status ORD-20260825-XXXX</code>",
@@ -321,6 +412,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     order_ref = context.args[0].upper()
+    if user:
+        log_customer(user, f"Mengecek status pesanan: /status {order_ref}")
     await _show_order_detail(update, context, order_ref=order_ref, edit=False)
 
 
@@ -328,8 +421,11 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler /admin - Menu khusus Owner / Admin untuk kelola stok"""
     user = update.effective_user
     if user is None or not _is_admin(user.id):
+        if user:
+            log_customer(user, "Mencoba mengakses /admin (Ditolak: Bukan Owner)")
         await update.message.reply_text("⛔ Anda bukan owner/admin bot ini.")
         return
+    log_admin(user, "Membuka Panel Owner (/admin)")
     await _show_admin_stock_list(update, context, edit=False)
 
 
@@ -340,27 +436,38 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("⛔ Anda bukan owner/admin bot ini.")
         return
 
+    log_admin(user, "Memicu perintah /broadcast")
     if context.args:
         text = " ".join(context.args)
-        context.user_data["broadcast_text"] = text
-        context.user_data["admin_state"] = "BROADCAST_CONFIRM"
-        db.set_admin_state(user.id, "BROADCAST_CONFIRM", {"broadcast_text": text})
-
         user_count = db.get_user_count()
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 Ya, Kirim Broadcast", callback_data="admin_bcast:send")],
             [InlineKeyboardButton("❌ Batal", callback_data="admin_cancel:stock:0")],
         ])
-        await update.message.reply_text(
+        preview_text = (
             f"📢 <b>Pratinjau Pesan Broadcast</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"{text}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👥 Target Penerima: <b>{user_count} Pengguna</b>\n\n"
-            f"Apakah Anda yakin ingin mengirim pesan broadcast ini sekarang?",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML,
+            f"Apakah Anda yakin ingin mengirim pesan broadcast ini sekarang?"
         )
+        try:
+            await update.message.reply_text(
+                preview_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+            context.user_data["broadcast_text"] = text
+            context.user_data["admin_state"] = "BROADCAST_CONFIRM"
+            db.set_admin_state(user.id, "BROADCAST_CONFIRM", {"broadcast_text": text})
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ <b>Format HTML pesan tidak valid!</b>\n\n"
+                f"Detail error: <code>{html.escape(str(e))}</code>\n\n"
+                f"Pastikan semua tag (seperti <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>) ditutup dengan benar.",
+                parse_mode=ParseMode.HTML,
+            )
     else:
         await _handle_admin_broadcast_start(update, context)
 
@@ -372,11 +479,18 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Router untuk semua callback query dari InlineKeyboard."""
     query = update.callback_query
-    await query.answer()
+    user = update.effective_user
 
     data: str = query.data or ""
     parts = data.split(":")
     action = parts[0]
+
+    # Log interaksi callback
+    if user:
+        if action.startswith("admin"):
+            log_admin(user, f"Tombol: {data}")
+        elif action in ("product", "buy", "buy_qty", "cancel_order"):
+            log_customer(user, f"Tombol: {data}")
 
     # Khusus verifikasi keanggotaan channel jika tombol lama ditekan
     if action == "check_sub":
@@ -492,6 +606,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         case _:
             await _safe_edit_or_send_text(update, context, text="❓ Aksi tidak dikenali.")
 
+    # Fallback: jawab callback query jika belum dijawab oleh handler
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
 
 async def _handle_check_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler tombol verifikasi channel jika ada tombol lama tersisa."""
@@ -508,9 +628,6 @@ async def _handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sub: 
     match sub:
         case "products":
             await _show_product_list(update, context, edit=(not force_new), force_new=force_new)
-        case "orders":
-            user = update.effective_user
-            await _show_orders(update, context, telegram_id=user.id if user else 0, edit=(not force_new), force_new=force_new)
         case "help":
             await _show_help(update, context)
         case "main":
@@ -540,9 +657,9 @@ async def _handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, produc
         await _safe_edit_or_send_text(update, context, text="😔 Maaf, stok produk ini habis.")
         return
 
-    # Jika stok hanya 1 unit, langsung proses pembelian
+    # Jika stok hanya 1 unit, tampilkan konfirmasi harga
     if product["stock"] == 1:
-        await _process_purchase(update, context, product_id=product_id, qty=1)
+        await _show_order_confirmation(update, context, product_id=product_id, qty=1)
     else:
         # Jika stok > 1 atau unlimited (-1), tampilkan pemilih jumlah (Quantity Selector)
         await _show_quantity_selector(update, context, product_id=product_id)
@@ -562,7 +679,7 @@ async def _show_quantity_selector(
         stock_badge = "♾️ Unlimited"
         options = [1, 2, 3, 5, 10]
     else:
-        stock_badge = f"{stock} unit ready"
+        stock_badge = f"{stock}"
         if stock <= 5:
             options = list(range(1, stock + 1))
         else:
@@ -577,15 +694,15 @@ async def _show_quantity_selector(
         f"💰 <b>Harga:</b> {_fmt_rupiah(product['price'])} / unit\n"
         f"📊 <b>Stok:</b> {stock_badge}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Silakan pilih jumlah unit yang ingin dibeli:"
+        f"Silakan pilih jumlah yang ingin dibeli:"
     )
 
     buttons = []
     row = []
     for q in options:
-        label = f"{q} unit" if q != stock or stock <= 5 else f"Max ({q})"
+        label = f"{q}" if q != stock or stock <= 5 else f"Max ({q})"
         row.append(InlineKeyboardButton(label, callback_data=f"buy_qty:{product_id}:{q}"))
-        if len(row) == 3:
+        if len(row) == 4:
             buttons.append(row)
             row = []
     if row:
@@ -618,7 +735,7 @@ async def _show_order_confirmation(
         f"🧾 <b>Konfirmasi Rincian Pesanan</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>Produk:</b> {product['name']}\n"
-        f"🔢 <b>Jumlah:</b> <b>{qty} unit</b>\n"
+        f"🔢 <b>Jumlah:</b> <b>{qty}</b>\n"
         f"💰 <b>Harga Satuan:</b> {_fmt_rupiah(product['price'])}\n"
         f"💵 <b>Total Pembayaran:</b> <b>{_fmt_rupiah(total_price)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -647,11 +764,11 @@ async def _handle_buy_custom_start(
 
     context.user_data["user_state"] = f"BUY_QTY_{product_id}"
 
-    stock_badge = "♾️ Unlimited" if product["stock"] == -1 else f"{product['stock']} unit"
+    stock_badge = "♾️ Unlimited" if product["stock"] == -1 else f"{product['stock']}"
     text = (
         f"🔢 <b>Masukkan Jumlah Pembelian</b>\n\n"
         f"📦 Produk: <b>{product['name']}</b>\n"
-        f"📊 Stok Tersedia: <b>{stock_badge}</b>\n\n"
+        f"📊 <b>Stok:</b> {stock_badge}\n\n"
         f"Silakan ketik dan kirimkan angka jumlah yang ingin dibeli (Contoh: <code>2</code>):"
     )
 
@@ -699,7 +816,7 @@ async def _handle_cancel_order(
         f"Tagihan pembayaran untuk pesanan ini sudah ditutup dan stok telah dikembalikan."
     )
     buttons = [
-        [InlineKeyboardButton("🛍️ Katalog Produk", callback_data="menu:products")],
+        [InlineKeyboardButton("🛍️ Produk", callback_data="menu:products")],
         [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")],
     ]
 
@@ -738,8 +855,9 @@ async def _handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE, dest:
 async def _show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, force_new: bool = False) -> None:
     user = update.effective_user
     keyboard = _build_main_menu_keyboard(user.id if user else 0)
+    first_name_esc = html.escape(user.first_name) if (user and user.first_name) else "Kak"
     text = (
-        f"👋 Halo, <b>{user.first_name if user else 'Kak'}</b>!\n\n"
+        f"👋 Halo, <b>{first_name_esc}</b>!\n\n"
         f"Selamat datang di <b>Sonel Store</b>.\n"
         f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
     )
@@ -1185,7 +1303,16 @@ async def _handle_admin_broadcast_send(update: Update, context: ContextTypes.DEF
             success_cnt += 1
             await asyncio.sleep(0.04)  # Mencegah rate-limit Telegram (maks 30 msg/detik)
         except Exception:
-            fail_cnt += 1
+            try:
+                # Fallback kirim plain text jika ada masalah parsing HTML
+                await context.bot.send_message(
+                    chat_id=tg_id,
+                    text=bcast_text,
+                )
+                success_cnt += 1
+                await asyncio.sleep(0.04)
+            except Exception:
+                fail_cnt += 1
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ Panel Owner", callback_data="admin:stock")],
@@ -1235,6 +1362,11 @@ async def _handle_admin_add_skip_desc(update: Update, context: ContextTypes.DEFA
     if context.user_data.get("admin_state") != "ADD_DESC":
         return
 
+    if not context.user_data.get("new_product"):
+        context.user_data["admin_state"] = None
+        await _safe_edit_or_send_text(update, context, text="❌ Sesi tambah produk sudah kadaluarsa. Silakan mulai ulang.")
+        return
+
     context.user_data["new_product"]["desc"] = ""
     context.user_data["admin_state"] = "ADD_PRICE"
     if user:
@@ -1257,6 +1389,11 @@ async def _handle_admin_add_skip_desc(update: Update, context: ContextTypes.DEFA
 async def _handle_admin_add_unlim_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if context.user_data.get("admin_state") != "ADD_STOCK":
+        return
+
+    if not context.user_data.get("new_product"):
+        context.user_data["admin_state"] = None
+        await _safe_edit_or_send_text(update, context, text="❌ Sesi tambah produk sudah kadaluarsa. Silakan mulai ulang.")
         return
 
     context.user_data["admin_state"] = "ADD_UNLIM_DELIVERY"
@@ -1492,12 +1629,14 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
 
+        log_customer(user, f"Input custom qty: {qty} untuk produk ID {pid}")
         context.user_data.pop("user_state", None)
         await _show_order_confirmation(update, context, product_id=pid, qty=qty)
         return
 
     # ── Input Khusus Owner / Admin ────────────────────────────────────────────
     if not _is_admin(user.id):
+        log_customer(user, f"Kirim teks: {text[:40]}")
         return
 
     # Ambil state dari memory atau persistent database
@@ -1510,7 +1649,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             data = db_data
 
     if not state:
+        log_admin(user, f"Kirim teks: {text[:40]}")
         return
+
+    log_admin(user, f"Input State [{state}]: {text[:40]}")
 
     # 1. Tambah Produk: Nama
     if state == "ADD_NAME":
@@ -1556,6 +1698,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
         price = int(digits)
+        if price < 1:
+            await update.message.reply_text(
+                "❌ Harga produk minimal adalah <b>Rp 1</b>. Silakan kirimkan harga yang valid:",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         context.user_data["new_product"]["price"] = price
         context.user_data["admin_state"] = "ADD_STOCK"
         db.set_admin_state(user.id, "ADD_STOCK", context.user_data["new_product"])
@@ -1683,6 +1831,12 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
         price = int(digits)
+        if price < 1:
+            await update.message.reply_text(
+                "❌ Harga produk minimal adalah <b>Rp 1</b>. Silakan kirimkan harga yang valid:",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         db.update_product_price(pid, price)
         context.user_data.pop("admin_state", None)
         db.clear_admin_state(user.id)
@@ -1766,6 +1920,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else:
             raw_items = [text]
 
+        raw_items = [it.strip() for it in raw_items if it.strip()]
+        if not raw_items:
+            await update.message.reply_text("❌ Info akun tidak boleh kosong. Silakan kirimkan info akun atau klik Batal.")
+            return
+
         added_cnt = db.add_stock_items(pid, raw_items)
         context.user_data.pop("admin_state", None)
         db.clear_admin_state(user.id)
@@ -1776,25 +1935,36 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # 12. Input Pesan Broadcast ke Semua Pengguna
     if state == "BROADCAST_INPUT":
-        context.user_data["broadcast_text"] = text
-        context.user_data["admin_state"] = "BROADCAST_CONFIRM"
-        db.set_admin_state(user.id, "BROADCAST_CONFIRM", {"broadcast_text": text})
-
         user_count = db.get_user_count()
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 Ya, Kirim Broadcast", callback_data="admin_bcast:send")],
             [InlineKeyboardButton("❌ Batal", callback_data="admin_cancel:stock:0")],
         ])
-        await update.message.reply_text(
+        preview_text = (
             f"📢 <b>Pratinjau Pesan Broadcast</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"{text}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👥 Target Penerima: <b>{user_count} Pengguna</b>\n\n"
-            f"Apakah Anda yakin ingin mengirim pesan broadcast ini sekarang?",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML,
+            f"Apakah Anda yakin ingin mengirim pesan broadcast ini sekarang?"
         )
+        try:
+            await update.message.reply_text(
+                preview_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML,
+            )
+            context.user_data["broadcast_text"] = text
+            context.user_data["admin_state"] = "BROADCAST_CONFIRM"
+            db.set_admin_state(user.id, "BROADCAST_CONFIRM", {"broadcast_text": text})
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ <b>Format HTML pesan tidak valid!</b>\n\n"
+                f"Detail error: <code>{html.escape(str(e))}</code>\n\n"
+                f"Pastikan semua tag (seperti <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>) ditutup dengan benar.\n"
+                f"Silakan kirimkan kembali teks broadcast:",
+                parse_mode=ParseMode.HTML,
+            )
         return
 
 
@@ -1804,7 +1974,7 @@ async def _show_product_list(
     products = db.get_all_products()
 
     if not products:
-        msg = "😔 Saat ini belum ada produk yang tersedia di katalog."
+        msg = "😔 Saat ini belum ada produk yang tersedia."
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")]
         ])
@@ -1812,41 +1982,44 @@ async def _show_product_list(
         return
 
     text_lines = [
-        "🛍️ <b>Katalog Produk Sonel Store</b>",
+        "🛍️ <b>Produk Sonel Store</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
     ]
-    buttons = []
+    prod_buttons = []
+    row = []
 
     for i, p in enumerate(products, 1):
         if p["stock"] == 0:
-            stock_str = "❌ Stok Habis"
-            btn_badge = "(Habis)"
+            stock_str = "❌ Stok: Habis"
         elif p["stock"] == -1:
-            stock_str = "♾️ Unlimited"
-            btn_badge = ""
+            stock_str = "♾️ Stok: Unlimited"
         else:
-            stock_str = f"📦 {p['stock']} unit"
-            btn_badge = f"({p['stock']} unit)"
+            stock_str = f"📦 Stok: {p['stock']}"
 
         text_lines.append(
             f"<b>{i}. {p['name']}</b>\n"
             f"   💰 {_fmt_rupiah(p['price'])} | {stock_str}\n"
         )
 
-        p_name_short = p['name'][:22]
-        btn_label = f"{i}. {p_name_short} {btn_badge}".strip()
-
-        buttons.append([
+        row.append(
             InlineKeyboardButton(
-                btn_label,
+                f"{i}",
                 callback_data=f"product:{p['id']}",
             )
-        ])
+        )
+        if len(row) == 4:
+            prod_buttons.append(row)
+            row = []
+
+    if row:
+        prod_buttons.append(row)
 
     text_lines.append("━━━━━━━━━━━━━━━━━━━━━")
-    text_lines.append("👇 <i>Pilih salah satu produk di bawah:</i>")
+    text_lines.append("👇 <i>Pilih nomor produk di bawah:</i>")
 
-    buttons.append([InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")])
+    buttons = prod_buttons + [
+        [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")]
+    ]
     keyboard = InlineKeyboardMarkup(buttons)
     text = "\n".join(text_lines)
 
@@ -1864,9 +2037,9 @@ async def _show_product_detail(
     if product["stock"] == -1:
         stock_text = "♾️ Unlimited"
     elif product["stock"] == 0:
-        stock_text = "❌ Stok Habis"
+        stock_text = "❌ Habis"
     else:
-        stock_text = f"📦 {product['stock']} unit ready"
+        stock_text = f"📦 {product['stock']}"
 
     desc_line = f"\n📝 <b>Deskripsi:</b>\n{product['description']}\n" if product["description"] else ""
 
@@ -1885,7 +2058,7 @@ async def _show_product_detail(
             InlineKeyboardButton(f"🛒 Beli Sekarang – {_fmt_rupiah(product['price'])}", callback_data=f"buy:{product_id}")
         ])
     buttons.append([
-        InlineKeyboardButton("⬅️ Kembali ke Katalog", callback_data="back:products"),
+        InlineKeyboardButton("⬅️ Kembali", callback_data="back:products"),
         InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main"),
     ])
 
@@ -2039,7 +2212,7 @@ async def _process_purchase(
         )
         if msg:
             db.update_order_telegram_msg(order_ref, msg.chat_id, msg.message_id)
-            asyncio.create_task(_auto_check_payment(order_ref, msg.chat_id, msg.message_id))
+            context.application.create_task(_auto_check_payment(order_ref, msg.chat_id, msg.message_id))
     else:
         await _safe_edit_or_send_text(
             update,
@@ -2051,6 +2224,9 @@ async def _process_purchase(
     # Kirim notifikasi ke admin
     await _notify_admin_new_order(order_ref, user, product, amount_text, qty=qty)
 
+    # Log order di terminal
+    log_order(f"Order Dibuat: {order_ref} | {product['name']} (x{qty}) | {amount_text} oleh {_user_tag(user)}")
+
 
 async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> None:
     """
@@ -2061,9 +2237,20 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
     3. Kirim pesan teks invoice & akun baru yang rapi.
     4. Otomatis PIN pesan teks invoice tersebut di chat pembeli!
     """
-    max_checks = (config.ORDER_EXPIRY_MINUTES * 60) // 4
-    for _ in range(max_checks):
-        await asyncio.sleep(4)
+    elapsed = 0
+    max_seconds = config.ORDER_EXPIRY_MINUTES * 60
+    while elapsed < max_seconds:
+        # Adaptive interval: 4s untuk 2 menit pertama, 8s untuk 8 menit berikutnya, lalu 15s
+        if elapsed < 120:
+            delay = 4
+        elif elapsed < 600:
+            delay = 8
+        else:
+            delay = 15
+
+        await asyncio.sleep(delay)
+        elapsed += delay
+
         order = db.get_order_by_ref(order_ref)
         if not order or order["status"] != "PENDING":
             break
@@ -2081,6 +2268,9 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
                     produk_obj = db.get_product(order["product_id"])
                     produk_nama = produk_obj["name"] if produk_obj else "–"
 
+                    # Log pembayaran berhasil di terminal
+                    log_payment(f"✅ {order_ref} PAID / LUNAS ({_fmt_rupiah(order['final_amount'] or order['base_amount'])}) | Produk: {produk_nama}")
+
                     text = (
                         f"🎉 <b>Pembayaran Berhasil!</b>\n\n"
                         f"🆔 <b>Order ID:</b> <code>{order['order_ref']}</code>\n"
@@ -2096,7 +2286,10 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
                         [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main:new")],
                     ]
 
-                    bot_instance = _app.bot if _app is not None else Bot(token=config.TELEGRAM_BOT_TOKEN)
+                    if _app is None:
+                        logger.warning("_auto_check_payment: _app belum diinisialisasi, skip notifikasi.")
+                        break
+                    bot_instance = _app.bot
 
                     # Hapus foto QRIS agar tidak menutupi chat
                     try:
@@ -2139,47 +2332,6 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
     if final_check and final_check["status"] == "PENDING":
         db.update_order_status(order_ref, "EXPIRED")
         db.release_order_stock(order_ref)
-
-
-async def _show_orders(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    telegram_id: int,
-    edit: bool = False,
-    force_new: bool = False,
-) -> None:
-    user_db_id = db.get_user_db_id(telegram_id)
-    if user_db_id is None:
-        msg = "❓ Data pengguna tidak ditemukan. Ketik /start untuk memulai."
-        await _safe_edit_or_send_text(update, context, text=msg, force_new=force_new)
-        return
-
-    orders = db.get_user_orders(user_db_id, limit=10)
-
-    if not orders:
-        text = "📋 Belum ada riwayat pesanan.\n\nSilakan lihat katalog untuk mulai belanja!"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛍️ Katalog Produk", callback_data="menu:products")],
-            [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")],
-        ])
-    else:
-        text = "📋 <b>Riwayat Pesanan Anda</b>:\n\nPilih salah satu untuk melihat detail:"
-        buttons = []
-        for o in orders:
-            emoji = _status_emoji(o["status"])
-            buttons.append([
-                InlineKeyboardButton(
-                    f"{emoji} {o['order_ref']} · {o['product_name'][:18]}",
-                    callback_data=f"order:{o['order_ref']}",
-                )
-            ])
-        buttons.append([
-            InlineKeyboardButton("🛍️ Katalog", callback_data="menu:products"),
-            InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main"),
-        ])
-        keyboard = InlineKeyboardMarkup(buttons)
-
-    await _safe_edit_or_send_text(update, context, text=text, reply_markup=keyboard, force_new=force_new)
 
 
 async def execute_order_fulfillment(order_ref: str, order, send_notification: bool = False) -> str:
@@ -2239,7 +2391,10 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
 
     # 📢 Kirim invoice bukti pembelian ke channel @nelstores (hanya 1x per order berkat atomic DB lock)
     try:
-        asyncio.create_task(_send_channel_invoice(order_ref, order))
+        if _app is not None:
+            _app.create_task(_send_channel_invoice(order_ref, order))
+        else:
+            asyncio.create_task(_send_channel_invoice(order_ref, order))
     except Exception as err:
         logger.warning("Gagal memicu pengiriman invoice channel untuk ref %s: %s", order_ref, err)
 
@@ -2394,7 +2549,7 @@ async def _show_order_detail(
                     await query.answer("✅ Status pesanan sudah yang terbaru.")
             else:
                 logger.warning("edit message error: %s", err)
-    else:
+    elif update.message:
         if order["status"] == "PENDING" and order["qris_data"]:
             await update.message.reply_photo(
                 photo=generate_qris_image(order["qris_data"]),
@@ -2416,19 +2571,19 @@ async def _show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = (
         "ℹ️ <b>Panduan & Bantuan</b>\n\n"
         "<b>Cara Membeli:</b>\n"
-        "1. Pilih produk di menu <b>Katalog Produk</b>\n"
+        "1. Pilih produk di menu <b>Produk</b>\n"
         "2. Klik <b>Beli Sekarang</b> untuk membuat tagihan\n"
         "3. Scan foto QRIS dinamis menggunakan e-wallet atau m-Banking apa saja\n"
         "4. Setelah transfer, sistem otomatis memverifikasi dan mengirimkan info akun langsung ke chat ini.\n\n"
         "<b>Perintah Bot:</b>\n"
         "/start    – Menu utama\n"
-        "/products – Katalog produk\n"
+        "/products – Daftar produk\n"
         f"/status &lt;ref&gt; – Cek status pesanan{admin_line}\n"
         "<i>Hubungi admin jika Anda membutuhkan bantuan lebih lanjut.</i>"
     )
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🛍️ Katalog", callback_data="menu:products"),
+            InlineKeyboardButton("🛍️ Produk", callback_data="menu:products"),
             InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main"),
         ]
     ])
@@ -2448,12 +2603,15 @@ async def _notify_admin_new_order(order_ref: str, user, product, amount_text: st
     if user.id == config.ADMIN_TELEGRAM_ID:
         return
     try:
-        qty_str = f" (x{qty} unit)" if qty > 1 else ""
+        qty_str = f" (x{qty})" if qty > 1 else ""
+        u_name = html.escape(user.full_name) if user.full_name else "User"
+        u_handle = f"@{html.escape(user.username)}" if user.username else "–"
+        p_name = html.escape(product['name']) if product else "Produk"
         text = (
             f"🔔 <b>Order Baru Masuk!</b>\n\n"
-            f"👤 User   : {user.full_name} (@{user.username or '–'})\n"
+            f"👤 User   : {u_name} ({u_handle})\n"
             f"🆔 Ref    : <code>{order_ref}</code>\n"
-            f"📦 Produk : {product['name']}{qty_str}\n"
+            f"📦 Produk : {p_name}{qty_str}\n"
             f"💰 Nominal: {amount_text}\n"
             f"⏳ Status : PENDING"
         )
@@ -2483,7 +2641,10 @@ async def send_payment_notification(user_db_id: int, order_ref: str, fulfillment
         return
 
     telegram_id = row["telegram_id"]
-    bot_instance = _app.bot if _app is not None else Bot(token=config.TELEGRAM_BOT_TOKEN)
+    if _app is None:
+        logger.warning("send_payment_notification: _app belum diinisialisasi.")
+        return
+    bot_instance = _app.bot
 
     try:
         await _send_with_effect(
@@ -2644,7 +2805,7 @@ def generate_invoice_image(
     # 9. Tabel Rincian Transaksi
     rows = [
         ("Order ID", order_ref, True),
-        ("Jumlah Unit", f"{qty} Unit", False),
+        ("Jumlah Unit", f"{qty}", False),
         ("Metode Pembayaran", "QRIS Real-Time (Instant)", False),
         ("Waktu Transaksi", waktu_str, False),
         ("Pembeli", buyer_name, False),
@@ -2693,11 +2854,15 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
     if not channel:
         return
 
-    bot_instance = _app.bot if _app is not None else Bot(token=config.TELEGRAM_BOT_TOKEN)
+    if _app is None:
+        logger.warning("_send_channel_invoice: _app belum diinisialisasi.")
+        return
+    bot_instance = _app.bot
 
     try:
         product = db.get_product(order["product_id"])
-        prod_name = product["name"] if product else "Produk"
+        prod_name_raw = product["name"] if product else "Produk"
+        prod_name_esc = html.escape(prod_name_raw)
         qty = order["qty"] if ("qty" in order.keys() and order["qty"]) else 1
         total_amount = (order["final_amount"] if "final_amount" in order.keys() else None) or (order["base_amount"] if "base_amount" in order.keys() else 0) or 0
         created_at = order["created_at"] if "created_at" in order.keys() else ""
@@ -2722,17 +2887,18 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
                     fname = user_row["full_name"]
                     buyer_text = fname[:15]
 
-        qty_str = f"{qty} unit" if qty > 1 else "1 unit"
+        qty_str = f"{qty}" if qty > 1 else "1"
+        buyer_esc = html.escape(buyer_text)
 
         invoice_text = (
             f"🧾 <b>INVOICE PEMBELIAN BERHASIL</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🆔 <b>Order ID:</b> <code>{order_ref}</code>\n"
-            f"📦 <b>Produk:</b> {prod_name}\n"
+            f"📦 <b>Produk:</b> {prod_name_esc}\n"
             f"🔢 <b>Jumlah:</b> {qty_str}\n"
             f"💰 <b>Total Bayar:</b> <b>{_fmt_rupiah(total_amount)}</b>\n"
             f"💳 <b>Metode:</b> QRIS Real-Time\n"
-            f"👤 <b>Pembeli:</b> {buyer_text}\n"
+            f"👤 <b>Pembeli:</b> {buyer_esc}\n"
             f"📅 <b>Waktu:</b> {waktu_str}\n"
             f"📊 <b>Status:</b> ✅ <b>PAID / LUNAS</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2747,7 +2913,7 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
         # Generate gambar struk JPG otomatis
         photo_bio = generate_invoice_image(
             order_ref=order_ref,
-            product_name=prod_name,
+            product_name=prod_name_raw,
             qty=qty,
             total_amount=total_amount,
             buyer_name=buyer_text,
@@ -2761,9 +2927,9 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
             reply_markup=keyboard,
             parse_mode=ParseMode.HTML,
         )
-        logger.info("Foto Invoice order %s berhasil diposting ke channel %s", order_ref, channel)
+        log_invoice(f"Struk order {order_ref} ({prod_name_raw}) berhasil diposting ke {channel}")
     except Exception as e:
-        logger.exception("Gagal mengirim foto invoice order %s ke channel %s: %s", order_ref, channel, e)
+        log_error(f"Gagal posting invoice {order_ref} ke channel {channel}", str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2772,8 +2938,6 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
 
 async def post_init(application: Application) -> None:
     """Daftarkan command ke BotFather dan aktifkan auto-check untuk order PENDING."""
-    from telegram import BotCommandScopeDefault, BotCommandScopeChat
-
     # BUG-08: Daftarkan command publik (tanpa /admin) untuk semua user
     public_commands = [
         BotCommand("start",    "Menu utama"),
@@ -2799,11 +2963,22 @@ async def post_init(application: Application) -> None:
     try:
         pending_list = db.get_pending_orders_with_msg()
         for po in pending_list:
-            asyncio.create_task(_auto_check_payment(po["order_ref"], po["chat_id"], po["message_id"]))
+            application.create_task(_auto_check_payment(po["order_ref"], po["chat_id"], po["message_id"]))
         if pending_list:
             logger.info("Auto-check pembayaran diaktifkan untuk %d order PENDING.", len(pending_list))
     except Exception:
         logger.exception("Gagal inisialisasi auto check pending orders")
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler global untuk mencatat error Telegram dengan rapi di terminal."""
+    err = context.error
+    if not err:
+        return
+    err_str = str(err)
+    if "Message is not modified" in err_str or "Query is too old" in err_str:
+        return
+    log_error("Telegram Exception", err_str)
 
 
 def create_application() -> Application:
@@ -2820,19 +2995,21 @@ def create_application() -> Application:
     # Register handlers
     application.add_handler(CommandHandler("start",     cmd_start))
     application.add_handler(CommandHandler("products",  cmd_products))
-    application.add_handler(CommandHandler("orders",    cmd_orders))
     application.add_handler(CommandHandler("status",    cmd_status))
     application.add_handler(CommandHandler("admin",     cmd_admin))
     application.add_handler(CommandHandler("broadcast", cmd_broadcast))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
+    # Error handler global
+    application.add_error_handler(global_error_handler)
+
     _app = application
     return application
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ENTRYPOINT (jalankan bot secara standalone)
+# ── ENTRYPOINT (jalankan bot secara standalone) ──────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
@@ -2840,6 +3017,10 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         level=logging.INFO,
     )
+
+    # Matikan log verbose httpx & httpcore agar token bot di URL tidak bocor ke log
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     # Inisialisasi event loop di MainThread (diperlukan untuk Python 3.12+)
     try:
@@ -2852,11 +3033,13 @@ def main() -> None:
 
     application = create_application()
 
-    logger.info("Bot mulai berjalan (polling)...")
+    # Cetak banner terminal modern & aesthetic
+    print_startup_banner()
+
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot dihentikan oleh pengguna.")
+        print(f"\n{C_YELLOW}[INFO] Bot dihentikan oleh pengguna.{C_RESET}")
 
 
 if __name__ == "__main__":
