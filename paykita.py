@@ -215,7 +215,11 @@ async def get_order_status(paykita_id: str) -> dict | None:
 
     try:
         client = _get_client()
-        resp = await client.get(url, headers=headers)
+        resp = await client.get(
+            url,
+            headers=headers,
+            timeout=httpx.Timeout(8.0, connect=5.0),
+        )
 
         if resp.is_success:
             body = resp.json()
@@ -232,19 +236,19 @@ async def get_order_status(paykita_id: str) -> dict | None:
 
 # ── Verifikasi Webhook ────────────────────────────────────────────────────────
 
-def verify_webhook_signature(raw_body: bytes, received_signature: str) -> bool:
+def verify_webhook_signature(
+    raw_body: bytes,
+    received_signature: str,
+    timestamp: str = "",
+) -> bool:
     """
     Verifikasi signature HMAC-SHA256 dari webhook PayKita.
 
-    PayKita mengirim signature dalam header webhook.
-    Secret diambil dari PAYKITA_WEBHOOK_SECRET di .env.
-
-    TODO: Konfirmasi nama header signature di dashboard PayKita
-          (kemungkinan: X-Signature, X-PayKita-Signature, atau X-Hub-Signature-256).
-
-    Cara kerja:
-      expected = HMAC-SHA256(secret, raw_body).hex()
-      lalu bandingkan dengan received_signature (constant-time compare).
+    Sesuai dokumentasi resmi PayKita:
+    - Header `x-paykita-timestamp`: unix timestamp string
+    - Header `x-paykita-signature`: format `v1=<hex_hmac>`
+    - Data yang ditandatangani     : `x-paykita-timestamp + "." + raw_request_body`
+    - Secret                       : `PAYKITA_WEBHOOK_SECRET` di `.env`
     """
     secret = config.PAYKITA_WEBHOOK_SECRET
     if not secret:
@@ -260,12 +264,17 @@ def verify_webhook_signature(raw_body: bytes, received_signature: str) -> bool:
         return False
 
     sig = received_signature.strip().lower()
-    if sig.startswith("sha256="):
+    if sig.startswith("v1="):
+        sig = sig[3:]
+    elif sig.startswith("sha256="):
         sig = sig[7:]
+
+    ts = timestamp.strip()
+    signed_payload = (ts.encode("utf-8") + b"." + raw_body) if ts else raw_body
 
     expected = hmac.new(
         secret.encode("utf-8"),
-        raw_body,
+        signed_payload,
         hashlib.sha256,
     ).hexdigest()
 

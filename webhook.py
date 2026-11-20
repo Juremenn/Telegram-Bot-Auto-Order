@@ -14,7 +14,7 @@ Cara menjalankan:
 
 import logging
 
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 
 import config
@@ -71,27 +71,31 @@ async def health() -> dict:
 # ── Webhook PayKita ───────────────────────────────────────────────────────────
 
 @app.post("/webhook/paykita")
-async def webhook_paykita(request: Request) -> JSONResponse:
+async def webhook_paykita(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
     """
     Menerima notifikasi pembayaran dari PayKita.
 
     PayKita mengirim POST request dengan:
-    - Header: signature HMAC-SHA256
-    - Body  : JSON dengan informasi order yang berubah status
+    - Header: `x-paykita-timestamp` dan `x-paykita-signature` (`v1=<hex>`)
+    - Body  : JSON dengan informasi event & order
     """
     # 1. Baca raw body SEBELUM parse JSON (penting untuk kalkulasi HMAC)
     raw_body = await request.body()
 
-    # 2. Ambil signature dari header (cek semua variasi umum)
+    # 2. Ambil signature & timestamp dari header
     sig_value = ""
     for h in SIGNATURE_HEADERS:
         val = request.headers.get(h)
         if val:
             sig_value = val
             break
+    timestamp = request.headers.get("x-paykita-timestamp", "")
 
-    # 3. Verifikasi HMAC-SHA256
-    if not paykita.verify_webhook_signature(raw_body, sig_value):
+    # 3. Verifikasi HMAC-SHA256 (timestamp + "." + raw_body)
+    if not paykita.verify_webhook_signature(raw_body, sig_value, timestamp=timestamp):
         client_ip = request.client.host if request.client else "unknown"
         logger.warning("Webhook: signature tidak valid dari IP=%s", client_ip)
         raise HTTPException(
@@ -107,83 +111,93 @@ async def webhook_paykita(request: Request) -> JSONResponse:
             detail="Payload tidak valid",
         )
 
+    event_name = str(payload.get("event", "")).lower()
+    if event_name == "webhook.test":
+        logger.info("Webhook test diterima dari PayKita: id=%s", payload.get("id", ""))
+        return JSONResponse({"ok": True, "received": True, "event": "webhook.test"})
+
+    data = payload.get("data", payload) if isinstance(payload.get("data"), dict) else payload
     logger.info(
-        "Webhook diterima: ref=%s status=%s",
-        payload.get("reference"),
-        payload.get("status"),
+        "Webhook diterima: event=%s ref=%s order_id=%s status=%s",
+        event_name or "-",
+        data.get("reference"),
+        data.get("order_id") or data.get("id"),
+        data.get("status"),
     )
 
-    # 5. Proses event secara async (tidak block response)
-    await _process_webhook_event(payload)
-
-    # PayKita mengharapkan response 200 OK dengan cepat
-    return JSONResponse({"received": True})
+    # 5. Balas 200 OK secepatnya (<10s timeout PayKita) dan proses fulfillment di background
+    background_tasks.add_task(_process_webhook_event, payload)
+    return JSONResponse({"ok": True, "received": True})
 
 
 async def _process_webhook_event(payload: dict) -> None:
     """
-    Proses event dari webhook PayKita.
+    Proses event dari webhook PayKita di background.
 
-    Field yang digunakan:
-    - id        : ID order dari PayKita
-    - reference : referensi order kita (order_ref)
-    - status    : status baru ("PAID", "EXPIRED", dsb.)
-
-    TODO: Sesuaikan field name jika dokumentasi PayKita menunjukkan nama berbeda.
+    Field yang digunakan (sesuai dokumentasi PayKita):
+    - event          : "order.paid" (opsional)
+    - data.order_id  : ID order dari PayKita (pay_...)
+    - data.reference : referensi order kita (order_ref)
+    - data.status    : status baru ("paid", "expired", dsb.)
     """
-    # Mendukung payload yang dibungkus 'data' maupun flat
-    data = payload.get("data", payload) if isinstance(payload.get("data"), dict) else payload
+    try:
+        event_name = str(payload.get("event", "")).lower()
+        data = payload.get("data", payload) if isinstance(payload.get("data"), dict) else payload
 
-    paykita_id = str(data.get("id", ""))
-    reference  = str(data.get("reference", ""))
-    new_status = str(data.get("status", "")).upper()
+        paykita_id = str(data.get("order_id") or data.get("id") or "")
+        reference  = str(data.get("reference", ""))
+        new_status = str(data.get("status", "")).upper()
+        if not new_status and event_name == "order.paid":
+            new_status = "PAID"
 
-    if not new_status:
-        logger.warning("Webhook: payload tanpa field 'status', diabaikan.")
-        return
+        if not new_status:
+            logger.warning("Webhook: payload tanpa field 'status', diabaikan.")
+            return
 
-    # Cari order di database (prioritas by reference, fallback by paykita_id)
-    order = None
-    if reference:
-        order = db.get_order_by_ref(reference)
-    if order is None and paykita_id:
-        order = db.get_order_by_paykita_id(paykita_id)
+        # Cari order di database (prioritas by reference, fallback by paykita_id)
+        order = None
+        if reference:
+            order = db.get_order_by_ref(reference)
+        if order is None and paykita_id:
+            order = db.get_order_by_paykita_id(paykita_id)
 
-    if order is None:
-        logger.warning(
-            "Webhook: order tidak ditemukan ref=%s pk_id=%s", reference, paykita_id
-        )
-        return
+        if order is None:
+            logger.warning(
+                "Webhook: order tidak ditemukan ref=%s pk_id=%s", reference, paykita_id
+            )
+            return
 
-    order_ref   = order["order_ref"]
-    curr_status = order["status"]
+        order_ref   = order["order_ref"]
+        curr_status = order["status"]
 
-    # BUG-11: Jangan proses ulang jika order sudah di-fulfil atau sedang diproses
-    if curr_status in ("COMPLETED", "PROCESSING", "PAID"):
+        # BUG-11: Jangan proses ulang jika order sudah di-fulfil atau sedang diproses
+        if curr_status in ("COMPLETED", "PROCESSING", "PAID"):
+            logger.info(
+                "Webhook: order %s sudah berstatus %s, skip fulfillment.",
+                order_ref, curr_status
+            )
+            return
+
+        # Hindari memproses ulang status yang sama
+        if curr_status == new_status:
+            logger.info("Webhook: status %s tidak berubah untuk ref=%s, skip.", new_status, order_ref)
+            return
+
         logger.info(
-            "Webhook: order %s sudah berstatus %s, skip fulfillment.",
-            order_ref, curr_status
+            "Webhook: order %s berubah %s → %s", order_ref, curr_status, new_status
         )
-        return
 
-    # Hindari memproses ulang status yang sama
-    if curr_status == new_status:
-        logger.info("Webhook: status %s tidak berubah untuk ref=%s, skip.", new_status, order_ref)
-        return
-
-    logger.info(
-        "Webhook: order %s berubah %s → %s", order_ref, curr_status, new_status
-    )
-
-    # Jalankan fulfillment SEBELUM update status agar atomic guard
-    # PENDING → PROCESSING di execute_order_fulfillment berjalan semestinya.
-    if new_status == "PAID":
-        await _run_fulfillment(order_ref, order)
-    elif new_status in ("EXPIRED", "FAILED", "CANCELLED"):
-        db.update_order_status(order_ref, new_status)
-        db.release_order_stock(order_ref)
-    else:
-        db.update_order_status(order_ref, new_status)
+        # Jalankan fulfillment SEBELUM update status agar atomic guard
+        # PENDING → PROCESSING di execute_order_fulfillment berjalan semestinya.
+        if new_status == "PAID":
+            await _run_fulfillment(order_ref, order)
+        elif new_status in ("EXPIRED", "FAILED", "CANCELLED"):
+            db.update_order_status(order_ref, new_status)
+            db.release_order_stock(order_ref)
+        else:
+            db.update_order_status(order_ref, new_status)
+    except Exception:
+        logger.exception("Webhook: gagal memproses event payload=%s", payload)
 
 
 async def _run_fulfillment(order_ref: str, order) -> None:
