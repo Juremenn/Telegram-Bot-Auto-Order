@@ -24,11 +24,13 @@ logger = logging.getLogger(__name__)
 
 def _get_connection() -> sqlite3.Connection:
     """Buat koneksi SQLite dengan row_factory."""
-    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+    db_dir = os.path.dirname(config.DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # performa & konkurensi
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -51,6 +53,8 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 def init_db() -> None:
     """Buat semua tabel jika belum ada dan isi produk contoh."""
     with get_db() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
                 id              INTEGER PRIMARY KEY,
@@ -567,20 +571,27 @@ def sync_product_stock_count(product_id: int) -> int:
 
 
 def sync_all_products_stock() -> None:
-    """Sinkronisasi stok semua produk aktif dalam SATU transaksi (BUG-06: hindari nested connections)."""
+    """Sinkronisasi stok semua produk aktif dalam SATU transaksi dengan agregasi query tunggal."""
     with get_db() as conn:
         prods = conn.execute("SELECT id, stock FROM products WHERE is_active = 1").fetchall()
+        stock_rows = conn.execute(
+            """
+            SELECT product_id,
+                   SUM(CASE WHEN is_used = 0 THEN 1 ELSE 0 END) AS avail,
+                   COUNT(*) AS total
+            FROM product_stocks
+            GROUP BY product_id
+            """
+        ).fetchall()
+        stock_map = {r["product_id"]: (r["avail"] or 0, r["total"] or 0) for r in stock_rows}
+        updates: list[tuple[int, int]] = []
         for p in prods:
             pid = p["id"]
-            avail = conn.execute(
-                "SELECT COUNT(*) AS avail FROM product_stocks WHERE product_id = ? AND is_used = 0",
-                (pid,),
-            ).fetchone()["avail"]
-            has_ever_had_pool = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM product_stocks WHERE product_id = ?", (pid,)
-            ).fetchone()["cnt"]
-            if p["stock"] != -1 or avail > 0 or has_ever_had_pool > 0:
-                conn.execute("UPDATE products SET stock = ? WHERE id = ?", (avail, pid))
+            avail, total = stock_map.get(pid, (0, 0))
+            if (p["stock"] != -1 or avail > 0 or total > 0) and p["stock"] != avail:
+                updates.append((avail, pid))
+        if updates:
+            conn.executemany("UPDATE products SET stock = ? WHERE id = ?", updates)
 
 
 # ── Helper: Orders ────────────────────────────────────────────────────────────

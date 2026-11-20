@@ -12,16 +12,34 @@ Cara menjalankan:
   uvicorn webhook:app --host 0.0.0.0 --port 8000
 """
 
+from contextlib import asynccontextmanager
 import logging
 
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 
-import config
 import database as db
 import paykita
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Inisialisasi DB saat startup dan tutup resource HTTP/Bot saat shutdown."""
+    db.init_db()
+    logger.info("Webhook server siap. Menunggu event dari PayKita...")
+    yield
+    try:
+        from bot import close_standalone_bot
+        await close_standalone_bot()
+    except Exception:
+        logger.exception("Gagal menutup standalone Bot client saat shutdown")
+    try:
+        await paykita.close_client()
+    except Exception:
+        logger.exception("Gagal menutup PayKita HTTP client saat shutdown")
+
 
 app = FastAPI(
     title="AutoOrderBot Webhook",
@@ -29,36 +47,18 @@ app = FastAPI(
     version="1.0.0",
     docs_url=None,    # Sembunyikan Swagger UI di production
     redoc_url=None,
+    lifespan=_lifespan,
 )
 
 # ── Konstanta ─────────────────────────────────────────────────────────────────
 # Daftar kemungkinan nama header signature dari webhook PayKita
-SIGNATURE_HEADERS = [
+SIGNATURE_HEADERS = (
     "x-signature",
     "x-paykita-signature",
     "x-hub-signature-256",
     "signature",
     "paykita-signature",
-]
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    """Inisialisasi database saat FastAPI startup."""
-    db.init_db()
-    logger.info("Webhook server siap. Menunggu event dari PayKita...")
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    """Tutup standalone Bot client saat FastAPI shutdown."""
-    try:
-        from bot import close_standalone_bot
-        await close_standalone_bot()
-    except Exception:
-        logger.exception("Gagal menutup standalone Bot client saat shutdown")
+)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -86,12 +86,10 @@ async def webhook_paykita(
     raw_body = await request.body()
 
     # 2. Ambil signature & timestamp dari header
-    sig_value = ""
-    for h in SIGNATURE_HEADERS:
-        val = request.headers.get(h)
-        if val:
-            sig_value = val
-            break
+    sig_value = next(
+        (request.headers[h] for h in SIGNATURE_HEADERS if request.headers.get(h)),
+        "",
+    )
     timestamp = request.headers.get("x-paykita-timestamp", "")
 
     # 3. Verifikasi HMAC-SHA256 (timestamp + "." + raw_body)
@@ -208,10 +206,10 @@ async def _run_fulfillment(order_ref: str, order) -> None:
     """
     # Impor lazy untuk menghindari circular import antara bot.py ↔ webhook.py
     try:
-        from bot import execute_order_fulfillment, send_payment_notification
+        from bot import execute_order_fulfillment
 
         # BUG-01/11: execute_order_fulfillment sudah punya idempotency guard internal
-        delivery = await execute_order_fulfillment(
+        await execute_order_fulfillment(
             order_ref=order_ref,
             order=order,
             send_notification=True,   # webhook path → kirim notif ke user

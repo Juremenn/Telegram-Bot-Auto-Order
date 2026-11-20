@@ -35,9 +35,33 @@ def _get_client() -> httpx.AsyncClient:
     global _client, _client_loop
     loop = asyncio.get_running_loop()
     if _client is None or _client.is_closed or _client_loop is not loop:
-        _client = httpx.AsyncClient(timeout=_TIMEOUT)
+        _client = httpx.AsyncClient(
+            timeout=_TIMEOUT,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        )
         _client_loop = loop
     return _client
+
+
+def _build_api_url(path: str) -> str:
+    """Bangun URL endpoint PayKita tanpa duplikasi suffix '/api'."""
+    base = config.PAYKITA_BASE_URL.rstrip("/")
+    if base.endswith("/api"):
+        base = base[:-4]
+    return f"{base}/api/{path.lstrip('/')}"
+
+
+def _make_error_result(error: str, raw: dict | None = None) -> "OrderResult":
+    """Helper pembentuk OrderResult gagal."""
+    return OrderResult(
+        success=False,
+        paykita_id=None,
+        final_amount=None,
+        qris_data=None,
+        checkout_url=None,
+        raw=raw or {},
+        error=error,
+    )
 
 
 async def close_client() -> None:
@@ -85,11 +109,7 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
         ...
     }
     """
-    # Strip trailing '/api' agar tidak dobel jika BASE_URL sudah mengandung /api
-    _base = config.PAYKITA_BASE_URL.rstrip("/")
-    if _base.endswith("/api"):
-        _base = _base[:-4]
-    url = f"{_base}/api/orders"
+    url = _build_api_url("orders")
     payload = {
         "base_amount": base_amount,
         "reference": reference,
@@ -108,7 +128,6 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
         logger.info("PayKita create_order → status=%s ref=%s", resp.status_code, reference)
 
         if not resp.is_success:
-            # Coba ambil pesan error dari respons
             try:
                 err_body = resp.json()
                 err_msg = err_body.get("message") or err_body.get("error") or str(err_body)
@@ -116,40 +135,16 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
                 err_msg = resp.text or f"HTTP {resp.status_code}"
 
             logger.error("PayKita error ref=%s (HTTP %s): %s", reference, resp.status_code, err_msg)
-            return OrderResult(
-                success=False,
-                paykita_id=None,
-                final_amount=None,
-                qris_data=None,
-                checkout_url=None,
-                raw={},
-                error=err_msg,
-            )
+            return _make_error_result(err_msg)
 
         body = resp.json()
         if not isinstance(body, dict):
-            return OrderResult(
-                success=False,
-                paykita_id=None,
-                final_amount=None,
-                qris_data=None,
-                checkout_url=None,
-                raw={},
-                error="Format respons PayKita tidak valid",
-            )
+            return _make_error_result("Format respons PayKita tidak valid")
 
         # Cek jika PayKita mengembalikan ok=False di body
         if body.get("ok") is False:
             err_msg = body.get("message") or body.get("error") or "Gagal membuat order di PayKita"
-            return OrderResult(
-                success=False,
-                paykita_id=None,
-                final_amount=None,
-                qris_data=None,
-                checkout_url=None,
-                raw=body,
-                error=err_msg,
-            )
+            return _make_error_result(err_msg, raw=body)
 
         # PayKita membungkus data di dalam property "data": {"ok": true, "data": {...}}
         data = body.get("data", body) if isinstance(body.get("data"), dict) else body
@@ -173,26 +168,10 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
 
     except httpx.TimeoutException:
         logger.error("PayKita timeout saat membuat order ref=%s", reference)
-        return OrderResult(
-            success=False,
-            paykita_id=None,
-            final_amount=None,
-            qris_data=None,
-            checkout_url=None,
-            raw={},
-            error="Timeout saat menghubungi PayKita. Coba lagi.",
-        )
+        return _make_error_result("Timeout saat menghubungi PayKita. Coba lagi.")
     except Exception as exc:
         logger.exception("PayKita error tidak terduga ref=%s", reference)
-        return OrderResult(
-            success=False,
-            paykita_id=None,
-            final_amount=None,
-            qris_data=None,
-            checkout_url=None,
-            raw={},
-            error=f"Error tidak terduga: {exc}",
-        )
+        return _make_error_result(f"Error tidak terduga: {exc}")
 
 
 async def get_order_status(paykita_id: str) -> dict | None:
@@ -204,10 +183,7 @@ async def get_order_status(paykita_id: str) -> dict | None:
     TODO: Verifikasi nama endpoint ini di dokumentasi dashboard PayKita Anda.
     Jika endpoint berbeda, sesuaikan path di bawah ini.
     """
-    _base = config.PAYKITA_BASE_URL.rstrip("/")
-    if _base.endswith("/api"):
-        _base = _base[:-4]
-    url = f"{_base}/api/orders/{paykita_id}"
+    url = _build_api_url(f"orders/{paykita_id}")
     headers = {
         "x-api-key": config.PAYKITA_API_KEY,
         "accept": "application/json",
