@@ -22,12 +22,15 @@ import html
 from typing import Any, Optional, Union
 from datetime import datetime, timezone
 import qrcode
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from telegram import (
     Update,
     Bot,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     BotCommand,
     BotCommandScopeDefault,
     BotCommandScopeChat,
@@ -242,6 +245,33 @@ def generate_qris_image(qris_string: str) -> io.BytesIO:
     return bio
 
 
+def _is_protected_message(message: Any) -> bool:
+    """Cek apakah pesan adalah invoice sukses atau tagihan QRIS yang tidak boleh ditimpa/dihapus."""
+    if not message:
+        return False
+    msg_txt = getattr(message, "text", None) or ""
+    if msg_txt and any(k in msg_txt for k in (
+        "PEMBAYARAN DITERIMA",
+        "INFORMASI / DETAIL AKUN",
+        "PAID (SELESAI)",
+        "Pesanan Selesai",
+        "Terima kasih telah berbelanja",
+        "Detail Akun / Lisensi:",
+        "Pembayaran Berhasil!",
+    )):
+        return True
+    cap_txt = getattr(message, "caption", None) or ""
+    if cap_txt and any(k in cap_txt for k in (
+        "Tagihan Pembayaran QRIS",
+        "Total Bayar:",
+        "Order ID:",
+        "Pembayaran Berhasil!",
+        "Detail Akun / Lisensi:",
+    )):
+        return True
+    return False
+
+
 async def _safe_edit_or_send_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -259,30 +289,7 @@ async def _safe_edit_or_send_text(
     """
     query = update.callback_query
     if query and query.message:
-        is_invoice = False
-        # BUG-15: Deteksi invoice lebih robust — cek keywords pembayaran sukses
-        if query.message.text:
-            msg_txt = query.message.text
-            if any(k in msg_txt for k in [
-                "PEMBAYARAN DITERIMA",
-                "INFORMASI / DETAIL AKUN",
-                "PAID (SELESAI)",
-                "Pesanan Selesai",
-                "Terima kasih telah berbelanja",
-                "Detail Akun / Lisensi:",
-                "Pembayaran Berhasil!",
-            ]):
-                is_invoice = True
-        # Cek di caption gambar juga
-        if not is_invoice and query.message.caption:
-            cap_txt = query.message.caption
-            if any(k in cap_txt for k in [
-                "Tagihan Pembayaran QRIS",
-                "Total Bayar:",
-                "Order ID:",
-            ]):
-                # Ini adalah pesan QRIS foto — jangan edit, biarkan auto-check yang tangani
-                is_invoice = True
+        is_invoice = _is_protected_message(query.message)
 
         if force_new or is_invoice or (query.data and ":new" in query.data):
             # Pesan invoice / info akun tetap dipertahankan, kirim pesan menu baru di bawahnya
@@ -380,6 +387,64 @@ def _build_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def _build_main_menu_text(user: Any) -> str:
+    """Format teks sambutan menu utama yang modern dan bersih."""
+    first_name_esc = html.escape(user.first_name) if (user and user.first_name) else "Kak"
+    return (
+        f"👋 Halo, <b>{first_name_esc}</b>!\n\n"
+        f"Selamat datang di <b>Sonel Store</b>.\n"
+        f"<blockquote>⚡ Layanan Auto-Order 24/7\n"
+        f"💳 Pembayaran QRIS Instan &amp; Otomatis</blockquote>\n"
+        f"Silakan pilih menu di bawah untuk mulai:"
+    )
+
+
+_BTN_CATALOG_REFRESH = "🔄 Refresh"
+_BTN_MAIN_MENU = "🏠 Menu Utama"
+
+
+def _build_product_reply_keyboard(products: list) -> ReplyKeyboardMarkup:
+    """Buat ReplyKeyboardMarkup angka produk di area input pesan bawah."""
+    rows: list[list[KeyboardButton]] = []
+    row: list[KeyboardButton] = []
+    for idx in range(1, len(products) + 1):
+        row.append(KeyboardButton(str(idx)))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([KeyboardButton(_BTN_CATALOG_REFRESH), KeyboardButton(_BTN_MAIN_MENU)])
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Tap atau ketik nomor produk...",
+    )
+
+
+async def _clear_reply_keyboard(
+    bot: Bot,
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    force: bool = False,
+) -> None:
+    """Hapus ReplyKeyboard angka produk secara senyap saat keluar dari katalog."""
+    was_active = context.user_data.pop("has_reply_kb", False)
+    if not (was_active or force):
+        return
+    try:
+        tmp = await bot.send_message(
+            chat_id=chat_id,
+            text=".",
+            reply_markup=ReplyKeyboardRemove(),
+            disable_notification=True,
+        )
+        await tmp.delete()
+    except Exception:
+        pass
+
+
 async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
     """Periksa apakah user sudah bergabung ke channel (dinonaktifkan / selalu True)."""
     return True
@@ -425,14 +490,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+    await _clear_reply_keyboard(context.bot, update.effective_chat.id, context)
     keyboard = _build_main_menu_keyboard(user.id)
-
-    first_name_esc = html.escape(user.first_name) if user.first_name else "Kak"
-    text = (
-        f"👋 Halo, <b>{first_name_esc}</b>!\n\n"
-        f"Selamat datang di <b>Sonel Store</b>.\n"
-        f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
-    )
+    text = _build_main_menu_text(user)
 
     # Kirim pesan /start dengan gambar menu.png + Efek Partikel Api
     await _send_with_effect(
@@ -559,6 +619,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if action == "check_sub":
         await _handle_check_sub(update, context)
         return
+
+    if action != "buy_custom":
+        context.user_data.pop("user_state", None)
 
     match action:
         case "menu":
@@ -756,14 +819,15 @@ async def _show_quantity_selector(
             if stock not in options:
                 options.append(stock)
 
+    p_name_esc = html.escape(product["name"])
     text = (
-        f"🔢 <b>Pilih Jumlah Pembelian</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 <b>Produk:</b> {product['name']}\n"
-        f"💰 <b>Harga:</b> {_fmt_rupiah(product['price'])} / unit\n"
-        f"📊 <b>Stok:</b> {stock_badge}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Silakan pilih jumlah yang ingin dibeli:"
+        f"🔢 <b>Pilih Jumlah Pembelian</b>\n\n"
+        f"<blockquote>"
+        f"📦 <b>Produk:</b> {p_name_esc}\n"
+        f"💰 <b>Harga:</b> <code>{_fmt_rupiah(product['price'])}</code> / unit\n"
+        f"📊 <b>Stok:</b> {stock_badge}"
+        f"</blockquote>\n\n"
+        f"👇 <i>Pilih jumlah unit yang ingin dibeli:</i>"
     )
 
     buttons = []
@@ -799,16 +863,17 @@ async def _show_order_confirmation(
         return
 
     total_price = product["price"] * qty
+    p_name_esc = html.escape(product["name"])
 
     text = (
-        f"🧾 <b>Konfirmasi Rincian Pesanan</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 <b>Produk:</b> {product['name']}\n"
-        f"🔢 <b>Jumlah:</b> <b>{qty}</b>\n"
+        f"🧾 <b>Konfirmasi Rincian Pesanan</b>\n\n"
+        f"<blockquote>"
+        f"📦 <b>Produk:</b> {p_name_esc}\n"
+        f"🔢 <b>Jumlah:</b> <b>{qty} unit</b>\n"
         f"💰 <b>Harga Satuan:</b> {_fmt_rupiah(product['price'])}\n"
-        f"💵 <b>Total Pembayaran:</b> <b>{_fmt_rupiah(total_price)}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<i>Klik tombol di bawah untuk melanjutkan ke pembayaran QRIS.</i>"
+        f"💵 <b>Total Bayar:</b> <b><code>{_fmt_rupiah(total_price)}</code></b>"
+        f"</blockquote>\n\n"
+        f"<i>Klik tombol di bawah untuk membuat tagihan QRIS otomatis.</i>"
     )
 
     buttons = [
@@ -833,12 +898,15 @@ async def _handle_buy_custom_start(
 
     context.user_data["user_state"] = f"BUY_QTY_{product_id}"
 
-    stock_badge = "♾️ Unlimited" if product["stock"] == -1 else f"{product['stock']}"
+    stock_badge = "♾️ Unlimited" if product["stock"] == -1 else f"{product['stock']} unit"
+    p_name_esc = html.escape(product["name"])
     text = (
-        f"🔢 <b>Masukkan Jumlah Pembelian</b>\n\n"
-        f"📦 Produk: <b>{product['name']}</b>\n"
-        f"📊 <b>Stok:</b> {stock_badge}\n\n"
-        f"Silakan ketik dan kirimkan angka jumlah yang ingin dibeli (Contoh: <code>2</code>):"
+        f"✏️ <b>Masukkan Jumlah Pembelian</b>\n\n"
+        f"<blockquote>"
+        f"📦 <b>Produk:</b> {p_name_esc}\n"
+        f"📊 <b>Stok Tersedia:</b> {stock_badge}"
+        f"</blockquote>\n\n"
+        f"Ketik dan kirimkan angka jumlah yang ingin dibeli (contoh: <code>2</code>):"
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -881,8 +949,10 @@ async def _handle_cancel_order(
 
     text = (
         f"❌ <b>Pesanan Dibatalkan</b>\n\n"
-        f"Order ID <code>{order_ref}</code> berhasil dibatalkan.\n"
-        f"Tagihan pembayaran untuk pesanan ini sudah ditutup dan stok telah dikembalikan."
+        f"<blockquote>"
+        f"🆔 Ref Pesanan: <code>{order_ref}</code>\n"
+        f"🔒 Tagihan pembayaran ditutup &amp; stok telah dikembalikan."
+        f"</blockquote>"
     )
     buttons = [
         [InlineKeyboardButton("🛍️ Produk", callback_data="menu:products")],
@@ -924,28 +994,36 @@ async def _handle_back(update: Update, context: ContextTypes.DEFAULT_TYPE, dest:
 async def _show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, force_new: bool = False) -> None:
     user = update.effective_user
     keyboard = _build_main_menu_keyboard(user.id if user else 0)
-    first_name_esc = html.escape(user.first_name) if (user and user.first_name) else "Kak"
-    text = (
-        f"👋 Halo, <b>{first_name_esc}</b>!\n\n"
-        f"Selamat datang di <b>Sonel Store</b>.\n"
-        f"Silakan pilih produk yang Anda butuhkan melalui tombol di bawah:"
-    )
+    text = _build_main_menu_text(user)
+    has_menu_image = os.path.exists(MENU_IMAGE_PATH)
+    await _clear_reply_keyboard(context.bot, update.effective_chat.id, context)
     query = update.callback_query
-    if query and query.message and not force_new:
-        if query.message.photo:
-            try:
-                await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-                return
-            except Exception:
-                pass
-        try:
-            await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-            return
-        except Exception:
-            pass
+    if query and query.message:
+        is_protected = _is_protected_message(query.message) or bool(query.data and ":new" in query.data)
+        if not force_new and not is_protected:
+            if query.message.photo:
+                try:
+                    await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                    return
+                except Exception as err:
+                    if "Message is not modified" in str(err):
+                        return
+            elif not has_menu_image:
+                try:
+                    await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                    return
+                except Exception as err:
+                    if "Message is not modified" in str(err):
+                        return
+            else:
+                # Pesan sebelumnya hanya teks (misal setelah batal order): hapus agar diganti menu bergambar
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
 
-    # Jika force_new (misal dari pesan invoice setelah bayar):
-    if os.path.exists(MENU_IMAGE_PATH):
+    # Kirim menu utama beserta gambar menu.png jika tersedia
+    if has_menu_image:
         with open(MENU_IMAGE_PATH, "rb") as f:
             await context.bot.send_photo(
                 chat_id=update.effective_chat.id,
@@ -955,7 +1033,7 @@ async def _show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, fo
                 parse_mode=ParseMode.HTML,
             )
     else:
-        await _safe_edit_or_send_text(update, context, text=text, reply_markup=keyboard, force_new=force_new)
+        await _safe_edit_or_send_text(update, context, text=text, reply_markup=keyboard, force_new=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1837,19 +1915,56 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _show_order_confirmation(update, context, product_id=pid, qty=qty)
         return
 
-    # ── Input Khusus Owner / Admin ────────────────────────────────────────────
+    # ── 1. Cek apakah Admin sedang dalam state input teks ─────────────────────
+    state = ""
+    data = {}
+    if _is_admin(user.id):
+        state = context.user_data.get("admin_state", "")
+        data = context.user_data.get("new_product", {})
+        if not state:
+            state, db_data = db.get_admin_state(user.id)
+            if db_data and not data:
+                context.user_data["new_product"] = db_data
+                data = db_data
+
+    # ── 2. Navigasi Reply Keyboard Katalog Produk (1, 2, Refresh, Menu Utama) ─
+    if not state:
+        if text == _BTN_MAIN_MENU:
+            log_customer(user, "Kembali ke Menu Utama (Reply Keyboard)")
+            await _cleanup_catalog_messages(update, context)
+            await _clear_reply_keyboard(context.bot, update.effective_chat.id, context, force=True)
+            await _show_main_menu(update, context, force_new=True)
+            return
+
+        if text == _BTN_CATALOG_REFRESH:
+            log_customer(user, "Refresh daftar produk (Reply Keyboard)")
+            await _cleanup_catalog_messages(update, context)
+            await _show_product_list(update, context, edit=False, force_new=True)
+            return
+
+        if text.isdigit():
+            idx = int(text)
+            index_map = context.user_data.get("product_index_map") or {}
+            prod_id = index_map.get(idx)
+            if prod_id is None:
+                all_prods = db.get_all_products()
+                if 1 <= idx <= len(all_prods):
+                    prod_id = all_prods[idx - 1]["id"]
+
+            if prod_id is not None:
+                log_customer(user, f"Memilih produk nomor #{idx} (Reply Keyboard)")
+                await _cleanup_catalog_messages(update, context)
+                await _show_product_detail(update, context, product_id=prod_id)
+                return
+            elif context.user_data.get("has_reply_kb"):
+                await update.message.reply_text(
+                    "❌ Nomor produk tidak ditemukan. Silakan pilih angka yang tersedia di keyboard bawah."
+                )
+                return
+
     if not _is_admin(user.id):
         log_customer(user, f"Kirim teks: {text[:40]}")
         return
-
-    # Ambil state dari memory atau persistent database
-    state: str = context.user_data.get("admin_state", "")
-    data = context.user_data.get("new_product", {})
-    if not state:
-        state, db_data = db.get_admin_state(user.id)
-        if db_data and not data:
-            context.user_data["new_product"] = db_data
-            data = db_data
 
     if not state:
         log_admin(user, f"Kirim teks: {text[:40]}")
@@ -2171,91 +2286,136 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
 
+async def _cleanup_catalog_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hapus pesan input user dan pesan katalog sebelumnya agar chat tetap bersih."""
+    old_cat_id = context.user_data.pop("catalog_msg_id", None)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if old_cat_id and chat_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_cat_id)
+        except Exception:
+            pass
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+
 async def _show_product_list(
     update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False, force_new: bool = False
 ) -> None:
     products = db.get_all_products()
+    chat_id = update.effective_chat.id
+    query = update.callback_query
 
     if not products:
-        msg = "😔 Saat ini belum ada produk yang tersedia."
+        await _clear_reply_keyboard(context.bot, chat_id, context)
+        msg = (
+            "🛍️ <b>Katalog Produk</b>\n\n"
+            "<blockquote>😔 Saat ini belum ada produk yang tersedia.</blockquote>"
+        )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")]
         ])
         await _safe_edit_or_send_text(update, context, text=msg, reply_markup=keyboard, force_new=force_new)
         return
 
-    text_lines = [
-        "🛍️ <b>Produk Sonel Store</b>",
-        "━━━━━━━━━━━━━━━━━━━━━",
-    ]
-    prod_buttons = []
-    row = []
+    # Hapus pesan menu/detail sebelumnya jika aman (bukan invoice/QRIS)
+    if query and query.message and not force_new and not _is_protected_message(query.message):
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        context.user_data.pop("catalog_msg_id", None)
+    elif not query:
+        old_cat_id = context.user_data.pop("catalog_msg_id", None)
+        if old_cat_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=old_cat_id)
+            except Exception:
+                pass
 
+    context.user_data["product_index_map"] = {i: p["id"] for i, p in enumerate(products, 1)}
+    context.user_data["has_reply_kb"] = True
+
+    item_lines = []
     for i, p in enumerate(products, 1):
         if p["stock"] == 0:
-            stock_str = "❌ Stok: Habis"
+            stock_tag = "<i>Habis</i>"
         elif p["stock"] == -1:
-            stock_str = "♾️ Stok: Unlimited"
+            stock_tag = "♾️ <i>Unlimited</i>"
         else:
-            stock_str = f"📦 Stok: {p['stock']}"
-
+            stock_tag = f"📦 <i>{p['stock']}</i>"
         p_name_esc = html.escape(p["name"])
-        text_lines.append(
-            f"<b>{i}. {p_name_esc}</b>\n"
-            f"   💰 {_fmt_rupiah(p['price'])} | {stock_str}\n"
+        item_lines.append(
+            f"<b>{i}.</b> {p_name_esc} — <code>{_fmt_rupiah(p['price'])}</code> ({stock_tag})"
         )
 
-        row.append(
-            InlineKeyboardButton(
-                f"{i}",
-                callback_data=f"product:{p['id']}",
-            )
+    caption = (
+        f"🛍️ <b>Katalog Produk — Sonel Store</b>\n\n"
+        f"<blockquote>" + "\n".join(item_lines) + "</blockquote>\n\n"
+        f"👇 <i>Tap nomor produk di keyboard bawah untuk melihat detail.</i>"
+    )
+    if len(caption) > 1000:
+        caption = (
+            f"🛍️ <b>Katalog Produk — Sonel Store</b>\n\n"
+            f"<blockquote>📦 Tersedia <b>{len(products)} produk</b> pilihan.\n"
+            f"Tap angka <b>1–{len(products)}</b> di keyboard bawah untuk melihat detail &amp; harga lengkap.</blockquote>"
         )
-        if len(row) == 4:
-            prod_buttons.append(row)
-            row = []
 
-    if row:
-        prod_buttons.append(row)
-
-    text_lines.append("━━━━━━━━━━━━━━━━━━━━━")
-    text_lines.append("👇 <i>Pilih nomor produk di bawah:</i>")
-
-    buttons = prod_buttons + [
-        [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main")]
-    ]
-    keyboard = InlineKeyboardMarkup(buttons)
-    text = "\n".join(text_lines)
-
-    await _safe_edit_or_send_text(update, context, text=text, reply_markup=keyboard, force_new=force_new)
+    catalog_bio = generate_catalog_image(products)
+    reply_kb = _build_product_reply_keyboard(products)
+    sent = await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=catalog_bio,
+        caption=caption,
+        reply_markup=reply_kb,
+        parse_mode=ParseMode.HTML,
+    )
+    if sent:
+        context.user_data["catalog_msg_id"] = sent.message_id
 
 
 async def _show_product_detail(
     update: Update, context: ContextTypes.DEFAULT_TYPE, product_id: int
 ) -> None:
     product = db.get_product(product_id)
+    chat_id = update.effective_chat.id
+    query = update.callback_query
+
     if product is None:
+        await _clear_reply_keyboard(context.bot, chat_id, context)
         await _safe_edit_or_send_text(update, context, text="❌ Produk tidak ditemukan.")
         return
+
+    await _clear_reply_keyboard(context.bot, chat_id, context)
+
+    if query and query.message and not _is_protected_message(query.message):
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
 
     if product["stock"] == -1:
         stock_text = "♾️ Unlimited"
     elif product["stock"] == 0:
         stock_text = "❌ Habis"
     else:
-        stock_text = f"📦 {product['stock']}"
+        stock_text = f"📦 {product['stock']} unit"
 
     p_name_esc = html.escape(product["name"])
     desc_esc = html.escape(product["description"]) if product["description"] else ""
-    desc_line = f"\n📝 <b>Deskripsi:</b>\n{desc_esc}\n" if desc_esc else ""
+    desc_block = f"\n<blockquote>{desc_esc}</blockquote>\n" if desc_esc else "\n"
 
     text = (
-        f"📦 <b>{p_name_esc}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━"
-        f"{desc_line}\n"
-        f"💰 <b>Harga:</b> <b>{_fmt_rupiah(product['price'])}</b>\n"
+        f"📦 <b>{p_name_esc}</b>"
+        f"{desc_block}"
+        f"<blockquote>"
+        f"💰 <b>Harga:</b> <code>{_fmt_rupiah(product['price'])}</code>\n"
         f"📊 <b>Stok:</b> {stock_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━"
+        f"⚡ <b>Pengiriman:</b> Otomatis Instan"
+        f"</blockquote>"
     )
 
     buttons = []
@@ -2264,11 +2424,18 @@ async def _show_product_detail(
             InlineKeyboardButton(f"🛒 Beli Sekarang – {_fmt_rupiah(product['price'])}", callback_data=f"buy:{product_id}")
         ])
     buttons.append([
-        InlineKeyboardButton("⬅️ Kembali", callback_data="back:products"),
+        InlineKeyboardButton("⬅️ Daftar Produk", callback_data="back:products"),
         InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main"),
     ])
 
-    await _safe_edit_or_send_text(update, context, text=text, reply_markup=InlineKeyboardMarkup(buttons))
+    card_bio = generate_product_card_image(product)
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=card_bio,
+        caption=text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def _process_purchase(
@@ -2383,15 +2550,18 @@ async def _process_purchase(
 
     amount_text = _fmt_rupiah(result.final_amount) if result.final_amount else _fmt_rupiah(total_price)
     qty_info = f" ({qty} unit)" if qty > 1 else ""
+    p_name_esc = html.escape(product["name"])
 
     text = (
         f"🧾 <b>Tagihan Pembayaran QRIS</b>\n\n"
+        f"<blockquote>"
         f"🆔 <b>Order ID:</b> <code>{order_ref}</code>\n"
-        f"📦 <b>Produk:</b> {product['name']}{qty_info}\n"
+        f"📦 <b>Produk:</b> {p_name_esc}{qty_info}\n"
         f"🔢 <b>Jumlah:</b> <b>{qty} unit</b>\n"
-        f"💰 <b>Total Bayar:</b> <b>{amount_text}</b>\n\n"
-        f"📱 Scan gambar QRIS di atas menggunakan BCA, DANA, GoPay, OVO, ShopeePay, atau m-Banking apa saja.\n\n"
-        f"<i>Status pembayaran akan otomatis terkonfirmasi saat transfer selesai.</i>"
+        f"💰 <b>Total Bayar:</b> <b><code>{amount_text}</code></b>"
+        f"</blockquote>\n\n"
+        f"📱 Scan QRIS di atas melalui BCA, DANA, GoPay, OVO, ShopeePay, atau m-Banking apa saja.\n"
+        f"<i>Pembayaran akan terkonfirmasi otomatis setelah transfer selesai.</i>"
     )
 
     buttons = [
@@ -2697,15 +2867,17 @@ async def _show_order_detail(
     else:
         # PENDING / EXPIRED / FAILED
         emoji = _status_emoji(order["status"])
-        dibayar_line = f"💳 <b>Dibayar:</b> {_fmt_rupiah(order['final_amount'])}\n" if order["final_amount"] else ""
+        dibayar_line = f"\n💳 <b>Dibayar:</b> {_fmt_rupiah(order['final_amount'])}" if order["final_amount"] else ""
         text = (
             f"🧾 <b>Detail Pesanan</b>\n\n"
+            f"<blockquote>"
             f"🆔 <b>Order ID:</b> <code>{order['order_ref']}</code>\n"
-            f"📦 <b>Produk:</b> {produk_nama}\n"
-            f"💰 <b>Total:</b> {_fmt_rupiah(order['final_amount'] or order['base_amount'])}\n"
-            f"{dibayar_line}"
-            f"📊 <b>Status:</b> {emoji} {order['status']}\n"
+            f"📦 <b>Produk:</b> {prod_nama_esc}\n"
+            f"💰 <b>Total:</b> <code>{_fmt_rupiah(order['final_amount'] or order['base_amount'])}</code>"
+            f"{dibayar_line}\n"
+            f"📊 <b>Status:</b> {emoji} <b>{order['status']}</b>\n"
             f"📅 <b>Waktu:</b> {order['created_at'][:19]}"
+            f"</blockquote>"
         )
         buttons = [
             [
@@ -2792,18 +2964,22 @@ async def _show_order_detail(
 
 async def _show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    admin_line = "\n/admin    – Panel kelola stok\n" if user and _is_admin(user.id) else ""
+    admin_line = "\n/admin – Panel kelola stok" if user and _is_admin(user.id) else ""
     text = (
-        "ℹ️ <b>Panduan & Bantuan</b>\n\n"
-        "<b>Cara Membeli:</b>\n"
-        "1. Pilih produk di menu <b>Produk</b>\n"
-        "2. Klik <b>Beli Sekarang</b> untuk membuat tagihan\n"
-        "3. Scan foto QRIS dinamis menggunakan e-wallet atau m-Banking apa saja\n"
-        "4. Setelah transfer, sistem otomatis memverifikasi dan mengirimkan info akun langsung ke chat ini.\n\n"
-        "<b>Perintah Bot:</b>\n"
-        "/start    – Menu utama\n"
-        "/products – Daftar produk\n"
-        f"/status &lt;ref&gt; – Cek status pesanan{admin_line}\n"
+        "ℹ️ <b>Panduan &amp; Bantuan — Sonel Store</b>\n\n"
+        "<b>🛒 Cara Pembelian:</b>\n"
+        "<blockquote>"
+        "1. Buka menu <b>Produk</b> lalu tap nomor produk di keyboard bawah.\n"
+        "2. Klik <b>Beli Sekarang</b> dan pilih jumlah unit.\n"
+        "3. Scan QRIS dinamis lewat e-wallet / m-Banking apa saja.\n"
+        "4. Info akun / lisensi terkirim otomatis setelah bayar."
+        "</blockquote>\n\n"
+        "<b>⌨️ Perintah Cepat:</b>\n"
+        "<blockquote>"
+        "/start – Menu utama\n"
+        "/products – Katalog produk\n"
+        f"/status &lt;ref&gt; – Cek status pesanan{admin_line}"
+        "</blockquote>\n\n"
         "<i>Hubungi admin jika Anda membutuhkan bantuan lebih lanjut.</i>"
     )
     keyboard = InlineKeyboardMarkup([
@@ -2917,27 +3093,428 @@ async def send_payment_notification(user_db_id: int, order_ref: str, fulfillment
 
 
 def _get_invoice_font(family: str, size: int, bold: bool = False):
-    """Helper untuk memuat font TTF dengan fallback multi-platform yang aman."""
-    candidates = []
-    if bold:
-        candidates = [
-            f"{family}bd.ttf", f"{family}-Bold.ttf", "arialbd.ttf",
-            "segoeuib.ttf", "calibrib.ttf", "DejaVuSans-Bold.ttf", "FreeSansBold.ttf"
-        ]
+    """Muat font TTF untuk template nota dengan fallback Windows & Linux."""
+    mono_bold = ["consolab.ttf", "courbd.ttf", "DejaVuSansMono-Bold.ttf", "LiberationMono-Bold.ttf"]
+    mono_reg = ["consola.ttf", "cour.ttf", "DejaVuSansMono.ttf", "LiberationMono-Regular.ttf"]
+    sans_bold = ["segoeuib.ttf", "arialbd.ttf", "calibrib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"]
+    sans_reg = ["segoeui.ttf", "arial.ttf", "calibri.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf"]
+
+    is_mono = family.lower() in ("mono", "consolas", "consola", "cour", "courier")
+    if is_mono:
+        candidates = (mono_bold if bold else mono_reg) + (sans_bold if bold else sans_reg)
     else:
-        candidates = [
-            f"{family}.ttf", f"{family}-Regular.ttf", "arial.ttf",
-            "segoeui.ttf", "calibri.ttf", "DejaVuSans.ttf", "FreeSans.ttf"
-        ]
-    for n in candidates:
+        candidates = (sans_bold if bold else sans_reg) + (mono_bold if bold else mono_reg)
+
+    for name in candidates:
         try:
-            return ImageFont.truetype(n, size)
+            return ImageFont.truetype(name, size)
         except Exception:
             pass
     try:
         return ImageFont.load_default(size=size)
     except Exception:
         return ImageFont.load_default()
+
+
+def _wrap_text_to_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+    max_lines: int = 2,
+) -> list[str]:
+    """Bungkus teks berdasarkan lebar piksel agar judul produk tidak terpotong terlalu dini."""
+    words = text.split()
+    if not words:
+        return ["-"]
+
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if draw.textlength(candidate, font=font) <= max_width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+                current = word
+            else:
+                lines.append(word)
+                current = ""
+            if len(lines) == max_lines:
+                break
+
+    if len(lines) < max_lines and current:
+        lines.append(current)
+    elif len(lines) == max_lines and current:
+        last = lines[-1]
+        while last and draw.textlength(last + "...", font=font) > max_width:
+            last = last[:-1].rstrip()
+        lines[-1] = (last + "...") if last else "..."
+
+    if len(lines) == max_lines and draw.textlength(lines[-1], font=font) > max_width:
+        last = lines[-1]
+        while last and draw.textlength(last + "...", font=font) > max_width:
+            last = last[:-1].rstrip()
+        lines[-1] = (last + "...") if last else "..."
+
+    return lines
+
+
+def _clean_pil_text(text: str) -> str:
+    """Bersihkan karakter emoji/astral agar tidak tampil sebagai kotak di font TTF Pillow."""
+    cleaned = "".join(
+        ch for ch in text
+        if ord(ch) <= 0xFFFF and not (0x2600 <= ord(ch) <= 0x27BF)
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _create_navy_canvas(width: int, height: int) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    """Buat kanvas dark-navy slate dengan garis aksen gradient atas khas Sonel Store."""
+    img = Image.new("RGB", (width, height), color=(11, 17, 32))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / max(height - 1, 1)
+        r = int(10 + (22 - 10) * ratio)
+        g = int(16 + (30 - 16) * ratio)
+        b = int(30 + (56 - 30) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    for x in range(width):
+        ratio = x / max(width - 1, 1)
+        r = int(99 + (16 - 99) * ratio)
+        g = int(102 + (185 - 102) * ratio)
+        b = int(241 + (129 - 241) * ratio)
+        draw.line([(x, 0), (x, 9)], fill=(r, g, b))
+
+    return img, draw
+
+
+def _draw_pill_badge(
+    draw: ImageDraw.ImageDraw,
+    right_x: int,
+    y: int,
+    label: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int],
+    text_color: tuple[int, int, int],
+    outline: tuple[int, int, int] | None = None,
+    dot_color: tuple[int, int, int] | None = None,
+    height: int = 44,
+    pad_x: int = 20,
+) -> int:
+    """Gambar badge pill rata kanan dengan titik indikator opsional."""
+    bbox = draw.textbbox((0, 0), label, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    dot_space = 22 if dot_color else 0
+    pill_w = tw + pad_x * 2 + dot_space
+    x1 = right_x - pill_w
+    draw.rounded_rectangle(
+        [x1, y, right_x, y + height],
+        radius=height // 2,
+        fill=fill,
+        outline=outline,
+        width=2 if outline else 0,
+    )
+    if dot_color:
+        cx, cy, r = x1 + pad_x + 5, y + height // 2, 5
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=dot_color)
+    tx = x1 + pad_x + dot_space - bbox[0]
+    ty = y + (height - th) // 2 - bbox[1]
+    draw.text((tx, ty), label, fill=text_color, font=font)
+    return x1
+
+
+def _stock_pill_style(stock: int) -> tuple[str, tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+    """Kembalikan (label, fill, outline, accent_text) untuk badge status stok."""
+    if stock == -1:
+        return "UNLIMITED", (6, 78, 59), (16, 185, 129), (52, 211, 153)
+    if stock > 0:
+        return f"READY • {stock}", (6, 78, 59), (16, 185, 129), (52, 211, 153)
+    return "HABIS", (69, 10, 10), (239, 68, 68), (248, 113, 113)
+
+
+def generate_catalog_image(products: list) -> io.BytesIO:
+    """Generate kartu katalog produk modern bertema dark-navy glassmorphic."""
+    width = 1080
+    visible_products = products[:10]
+    row_h = 128
+    row_gap = 18
+    header_h = 138
+    card_pad = 28
+    footer_h = 74
+    extra_note_h = 36 if len(products) > 10 else 0
+
+    rows_total_h = len(visible_products) * row_h + max(0, len(visible_products) - 1) * row_gap
+    card_y1 = header_h
+    card_y2 = card_y1 + card_pad * 2 + rows_total_h + extra_note_h
+    height = card_y2 + footer_h
+
+    img, draw = _create_navy_canvas(width, height)
+
+    font_brand = _get_invoice_font("sans", 44, bold=True)
+    font_sub = _get_invoice_font("sans", 20, bold=False)
+    font_badge = _get_invoice_font("sans", 22, bold=True)
+    font_num = _get_invoice_font("sans", 34, bold=True)
+    font_title = _get_invoice_font("sans", 29, bold=True)
+    font_price = _get_invoice_font("sans", 28, bold=True)
+    font_pill = _get_invoice_font("sans", 21, bold=True)
+    font_footer = _get_invoice_font("sans", 21, bold=False)
+
+    # Header
+    draw.text((56, 38), "SONEL STORE", fill=(255, 255, 255), font=font_brand)
+    draw.text((58, 92), "OFFICIAL PRODUCT CATALOG", fill=(148, 163, 184), font=font_sub)
+    _draw_pill_badge(
+        draw,
+        right_x=width - 56,
+        y=46,
+        label=f"{len(products)} PRODUK",
+        font=font_badge,
+        fill=(30, 41, 59),
+        outline=(99, 102, 241),
+        dot_color=(56, 189, 248),
+        text_color=(224, 231, 255),
+        height=48,
+    )
+
+    # Wadah kartu utama
+    draw.rounded_rectangle(
+        [52, card_y1, width - 52, card_y2],
+        radius=24,
+        fill=(20, 29, 47),
+        outline=(51, 65, 85),
+        width=2,
+    )
+
+    cur_y = card_y1 + card_pad
+    for idx, p in enumerate(visible_products, 1):
+        in_stock = p["stock"] != 0
+        row_outline = (51, 65, 85) if in_stock else (63, 45, 55)
+        draw.rounded_rectangle(
+            [80, cur_y, width - 80, cur_y + row_h],
+            radius=18,
+            fill=(13, 20, 36),
+            outline=row_outline,
+            width=2,
+        )
+
+        # Badge angka produk di kiri
+        num_fill = (30, 41, 82) if in_stock else (39, 46, 62)
+        num_outline = (99, 102, 241) if in_stock else (71, 85, 105)
+        num_x1, num_y1, num_x2, num_y2 = 104, cur_y + 26, 180, cur_y + 102
+        draw.rounded_rectangle(
+            [num_x1, num_y1, num_x2, num_y2],
+            radius=16,
+            fill=num_fill,
+            outline=num_outline,
+            width=2,
+        )
+        num_str = str(idx)
+        nb = draw.textbbox((0, 0), num_str, font=font_num)
+        nx = num_x1 + ((num_x2 - num_x1) - (nb[2] - nb[0])) // 2 - nb[0]
+        ny = num_y1 + ((num_y2 - num_y1) - (nb[3] - nb[1])) // 2 - nb[1]
+        draw.text((nx, ny), num_str, fill=(248, 250, 252), font=font_num)
+
+        # Badge status stok di kanan
+        stok_lbl, p_fill, p_out, p_txt = _stock_pill_style(p["stock"])
+        pill_x = _draw_pill_badge(
+            draw,
+            right_x=width - 104,
+            y=cur_y + 42,
+            label=stok_lbl,
+            font=font_pill,
+            fill=p_fill,
+            outline=p_out,
+            dot_color=p_out,
+            text_color=p_txt,
+            height=44,
+            pad_x=18,
+        )
+
+        # Judul & Harga
+        title_max_w = max(220, pill_x - 224)
+        clean_name = _clean_pil_text(p["name"]) or f"Produk #{idx}"
+        title_line = _wrap_text_to_width(draw, clean_name, font_title, title_max_w, max_lines=1)[0]
+        draw.text((204, cur_y + 24), title_line, fill=(248, 250, 252), font=font_title)
+        draw.text((204, cur_y + 70), _fmt_rupiah(p["price"]), fill=(56, 189, 248), font=font_price)
+
+        cur_y += row_h + row_gap
+
+    if len(products) > 10:
+        more_txt = f"+ {len(products) - 10} produk lainnya tersedia di caption & keyboard bawah"
+        mb = draw.textbbox((0, 0), more_txt, font=font_sub)
+        draw.text(((width - (mb[2] - mb[0])) // 2, card_y2 - 42), more_txt, fill=(148, 163, 184), font=font_sub)
+
+    footer_text = "Tap angka di keyboard bawah untuk memilih produk  •  Auto-Delivery 24/7"
+    fb = draw.textbbox((0, 0), footer_text, font=font_footer)
+    draw.text(((width - (fb[2] - fb[0])) // 2, card_y2 + 24), footer_text, fill=(148, 163, 184), font=font_footer)
+
+    bio = io.BytesIO()
+    bio.name = "catalog.jpg"
+    img.save(bio, "JPEG", quality=93)
+    bio.seek(0)
+    return bio
+
+
+def generate_product_card_image(product) -> io.BytesIO:
+    """Generate kartu detail produk modern bertema dark-navy glassmorphic."""
+    width, height = 1080, 680
+    img, draw = _create_navy_canvas(width, height)
+
+    font_brand = _get_invoice_font("sans", 44, bold=True)
+    font_sub = _get_invoice_font("sans", 20, bold=False)
+    font_pill = _get_invoice_font("sans", 22, bold=True)
+    font_prod_title = _get_invoice_font("sans", 38, bold=True)
+    font_lbl = _get_invoice_font("sans", 21, bold=True)
+    font_price = _get_invoice_font("sans", 58, bold=True)
+    font_desc = _get_invoice_font("sans", 25, bold=False)
+    font_footer = _get_invoice_font("sans", 21, bold=False)
+
+    # Header
+    draw.text((56, 38), "SONEL STORE", fill=(255, 255, 255), font=font_brand)
+    draw.text((58, 92), "PRODUCT DETAIL & INSTANT ORDER", fill=(148, 163, 184), font=font_sub)
+
+    stok_lbl, p_fill, p_out, p_txt = _stock_pill_style(product["stock"])
+    _draw_pill_badge(
+        draw,
+        right_x=width - 56,
+        y=46,
+        label=stok_lbl,
+        font=font_pill,
+        fill=p_fill,
+        outline=p_out,
+        dot_color=p_out,
+        text_color=p_txt,
+        height=48,
+    )
+
+    # Kartu utama
+    card_x1, card_y1, card_x2, card_y2 = 52, 138, width - 52, height - 68
+    draw.rounded_rectangle(
+        [card_x1, card_y1, card_x2, card_y2],
+        radius=24,
+        fill=(20, 29, 47),
+        outline=(51, 65, 85),
+        width=2,
+    )
+
+    # Nama Produk (maks 2 baris)
+    draw.text((card_x1 + 38, card_y1 + 28), "PRODUK PILIHAN", fill=(148, 163, 184), font=font_lbl)
+    clean_name = _clean_pil_text(product["name"]) or "Produk Digital"
+    title_lines = _wrap_text_to_width(draw, clean_name, font_prod_title, (card_x2 - card_x1) - 76, max_lines=2)
+    ty = card_y1 + 60
+    for line in title_lines:
+        draw.text((card_x1 + 38, ty), line, fill=(248, 250, 252), font=font_prod_title)
+        ty += 46
+
+    # Hero Box Harga
+    box_x1, box_y1, box_x2, box_y2 = card_x1 + 36, card_y1 + 168, card_x2 - 36, card_y1 + 318
+    draw.rounded_rectangle(
+        [box_x1, box_y1, box_x2, box_y2],
+        radius=18,
+        fill=(13, 20, 36),
+        outline=(99, 102, 241),
+        width=2,
+    )
+    draw.text((box_x1 + 32, box_y1 + 22), "HARGA SATUAN", fill=(148, 163, 184), font=font_lbl)
+    draw.text((box_x1 + 32, box_y1 + 56), _fmt_rupiah(product["price"]), fill=(56, 189, 248), font=font_price)
+    _draw_pill_badge(
+        draw,
+        right_x=box_x2 - 28,
+        y=box_y1 + 52,
+        label="QRIS INSTAN",
+        font=font_pill,
+        fill=(30, 41, 82),
+        outline=(99, 102, 241),
+        dot_color=(56, 189, 248),
+        text_color=(224, 231, 255),
+        height=46,
+    )
+
+    # Ringkasan deskripsi
+    desc_y = box_y2 + 26
+    draw.text((card_x1 + 38, desc_y), "RINGKASAN PRODUK", fill=(148, 163, 184), font=font_lbl)
+    raw_desc = _clean_pil_text(product["description"] or "")
+    if not raw_desc:
+        raw_desc = "Produk digital siap kirim otomatis setelah pembayaran QRIS terverifikasi."
+    desc_lines = _wrap_text_to_width(draw, raw_desc, font_desc, (card_x2 - card_x1) - 76, max_lines=2)
+    dy = desc_y + 34
+    for line in desc_lines:
+        draw.text((card_x1 + 38, dy), line, fill=(226, 232, 240), font=font_desc)
+        dy += 34
+
+    # Footer
+    footer_text = "Sonel Store Auto-Order  •  Pengiriman Otomatis 24 Jam"
+    fb = draw.textbbox((0, 0), footer_text, font=font_footer)
+    draw.text(((width - (fb[2] - fb[0])) // 2, card_y2 + 20), footer_text, fill=(148, 163, 184), font=font_footer)
+
+    bio = io.BytesIO()
+    bio.name = "product_card.jpg"
+    img.save(bio, "JPEG", quality=93)
+    bio.seek(0)
+    return bio
+
+
+def _draw_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    x1: int,
+    x2: int,
+    y: int,
+    fill: tuple[int, int, int],
+    dash: int = 10,
+    gap: int = 8,
+    width: int = 2,
+) -> None:
+    """Gambar garis putus-putus horizontal bergaya garis sobek nota."""
+    x = x1
+    while x < x2:
+        seg_end = min(x + dash, x2)
+        draw.line([(x, y), (seg_end, y)], fill=fill, width=width)
+        x += dash + gap
+
+
+def _draw_rubber_stamp(
+    base_img: Image.Image,
+    center_x: int,
+    center_y: int,
+    label: str,
+    font: ImageFont.FreeTypeFont,
+    ink_color: tuple[int, int, int],
+    angle: float = 7.0,
+) -> None:
+    """Tempel stempel persegi 'LUNAS' bergaya cap toko fisik pada layer RGBA."""
+    stamp_w, stamp_h = 220, 84
+    stamp = Image.new("RGBA", (stamp_w, stamp_h), (0, 0, 0, 0))
+    s_draw = ImageDraw.Draw(stamp)
+
+    # Bingkai ganda khas stempel karet toko
+    s_draw.rounded_rectangle(
+        [4, 4, stamp_w - 5, stamp_h - 5],
+        radius=6,
+        outline=(*ink_color, 215),
+        width=4,
+    )
+    s_draw.rounded_rectangle(
+        [11, 11, stamp_w - 12, stamp_h - 12],
+        radius=4,
+        outline=(*ink_color, 175),
+        width=2,
+    )
+
+    bbox = s_draw.textbbox((0, 0), label, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    tx = (stamp_w - tw) // 2 - bbox[0]
+    ty = (stamp_h - th) // 2 - bbox[1]
+    s_draw.text((tx, ty), label, fill=(*ink_color, 225), font=font)
+
+    rotated = stamp.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True)
+    paste_x = center_x - rotated.width // 2
+    paste_y = center_y - rotated.height // 2
+    base_img.paste(rotated, (paste_x, paste_y), rotated)
 
 
 def generate_invoice_image(
@@ -2947,148 +3524,205 @@ def generate_invoice_image(
     total_amount: int,
     buyer_name: str,
     waktu_str: str,
+    store_channel: str = "@nelstores",
 ) -> io.BytesIO:
-    """Generate gambar struk invoice modern, estetis, dan sangat jelas (HD 1080x1080)."""
+    """Generate gambar nota/struk kertas klasik Sonel Store (1080x1080)."""
     width, height = 1080, 1080
-    img = Image.new("RGB", (width, height), color=(11, 17, 32))
+
+    # Palet template nota klasik: alas batu hangat, kertas krem, tinta arang, 1 tinta stempel
+    desk_bg = (232, 226, 214)
+    paper_bg = (252, 251, 247)
+    paper_edge = (214, 208, 196)
+    ink_primary = (28, 25, 23)
+    ink_muted = (87, 83, 78)
+    rule_soft = (224, 218, 207)
+    rule_strong = (68, 64, 60)
+    stamp_ink = (22, 101, 52)
+
+    img = Image.new("RGBA", (width, height), (*desk_bg, 255))
+
+    # Geometri kertas nota dengan tepi gerigi atas & bawah
+    p_left, p_right = 140, 940
+    p_top, p_bottom = 58, 1022
+    tooth_w, tooth_h = 20, 10
+
+    poly_points: list[tuple[int, int]] = [(p_left, p_top + tooth_h)]
+    for x in range(p_left, p_right, tooth_w):
+        poly_points.append((x + tooth_w // 2, p_top))
+        poly_points.append((min(x + tooth_w, p_right), p_top + tooth_h))
+    poly_points.append((p_right, p_bottom - tooth_h))
+    for x in range(p_right, p_left, -tooth_w):
+        poly_points.append((x - tooth_w // 2, p_bottom))
+        poly_points.append((max(x - tooth_w, p_left), p_bottom - tooth_h))
+
+    # Bayangan tunggal untuk memisahkan kertas nota dari alas meja
+    shadow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    sh_draw = ImageDraw.Draw(shadow_layer)
+    shifted_poly = [(px, py + 12) for (px, py) in poly_points]
+    sh_draw.polygon(shifted_poly, fill=(65, 55, 42, 42))
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=14))
+    img = Image.alpha_composite(img, shadow_layer)
+
     draw = ImageDraw.Draw(img)
+    draw.polygon(poly_points, fill=(*paper_bg, 255))
+    draw.line(poly_points + [poly_points[0]], fill=(*paper_edge, 255), width=2)
 
-    # 1. Background gradient vertikal halus (Deep Navy Slate)
-    for y in range(height):
-        ratio = y / height
-        r = int(10 + (22 - 10) * ratio)
-        g = int(16 + (30 - 16) * ratio)
-        b = int(30 + (56 - 30) * ratio)
-        draw.line([(0, y), (width, y)], fill=(r, g, b))
-
-    # 2. Garis aksen gradient atas
-    for x in range(width):
-        ratio = x / width
-        r = int(99 + (16 - 99) * ratio)
-        g = int(102 + (185 - 102) * ratio)
-        b = int(241 + (129 - 241) * ratio)
-        draw.line([(x, 0), (x, 10)], fill=(r, g, b))
-
-    # 3. Setup Tipografi / Font Ukuran Besar
-    font_store_brand = _get_invoice_font("segoeui", 48, bold=True)
-    font_brand_sub   = _get_invoice_font("segoeui", 22, bold=False)
-    font_badge       = _get_invoice_font("segoeui", 24, bold=True)
-    font_hero_lbl    = _get_invoice_font("segoeui", 24, bold=True)
-    font_hero_val    = _get_invoice_font("segoeui", 68, bold=True)
-    font_verif       = _get_invoice_font("segoeui", 22, bold=True)
-    font_prod_lbl    = _get_invoice_font("segoeui", 22, bold=True)
-    font_prod_name   = _get_invoice_font("segoeui", 38, bold=True)
-    font_row_lbl     = _get_invoice_font("segoeui", 28, bold=False)
-    font_row_val     = _get_invoice_font("segoeui", 28, bold=True)
-    font_row_mono    = _get_invoice_font("consolas", 30, bold=True)
-    font_note        = _get_invoice_font("segoeui", 24, bold=False)
-    font_footer      = _get_invoice_font("segoeui", 22, bold=False)
-
-    # 4. Header: Nama Toko & Subtitle
-    draw.text((65, 40), "SONEL STORE", fill=(255, 255, 255), font=font_store_brand)
-    draw.text((68, 96), "OFFICIAL TRANSACTION RECEIPT", fill=(148, 163, 184), font=font_brand_sub)
-
-    # 5. Badge Status: PAID / LUNAS dengan titik indikator hijau
-    badge_w, badge_h = 240, 52
-    badge_x, badge_y = width - 65 - badge_w, 46
-    draw.rounded_rectangle(
-        [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
-        radius=26,
-        fill=(16, 185, 129),
+    # Takik sobekan setengah lingkaran murni di sisi dalam kertas (die-cut notch)
+    notch_y, notch_r = 248, 12
+    # Kiri: potong ke dalam kertas (arc -90..90), kanan: potong ke dalam kertas (arc 90..270)
+    draw.pieslice(
+        [p_left - notch_r, notch_y - notch_r, p_left + notch_r, notch_y + notch_r],
+        start=-90,
+        end=90,
+        fill=(*desk_bg, 255),
     )
-    dot_cx, dot_cy, dot_r = badge_x + 30, badge_y + 26, 6
-    draw.ellipse([dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r], fill=(255, 255, 255))
-    draw.text((badge_x + 48, badge_y + 11), "LUNAS / PAID", fill=(255, 255, 255), font=font_badge)
-
-    # 6. Wadah Kartu Utama (Glassmorphic Slate Container)
-    card_x1, card_y1, card_x2, card_y2 = 65, 142, width - 65, 985
-    draw.rounded_rectangle(
-        [card_x1, card_y1, card_x2, card_y2],
-        radius=24,
-        fill=(20, 29, 47),
-        outline=(51, 65, 85),
+    draw.arc(
+        [p_left - notch_r, notch_y - notch_r, p_left + notch_r, notch_y + notch_r],
+        start=-90,
+        end=90,
+        fill=(*paper_edge, 255),
+        width=2,
+    )
+    draw.pieslice(
+        [p_right - notch_r, notch_y - notch_r, p_right + notch_r, notch_y + notch_r],
+        start=90,
+        end=270,
+        fill=(*desk_bg, 255),
+    )
+    draw.arc(
+        [p_right - notch_r, notch_y - notch_r, p_right + notch_r, notch_y + notch_r],
+        start=90,
+        end=270,
+        fill=(*paper_edge, 255),
         width=2,
     )
 
-    # 7. Box Hero Total Pembayaran
-    tot_x1, tot_y1, tot_x2, tot_y2 = card_x1 + 30, card_y1 + 30, card_x2 - 30, card_y1 + 200
-    draw.rounded_rectangle(
-        [tot_x1, tot_y1, tot_x2, tot_y2],
-        radius=18,
-        fill=(13, 20, 36),
-        outline=(99, 102, 241),
-        width=2,
-    )
+    # Tipografi: sans-serif untuk identitas toko/produk/total, monospace untuk data struk
+    font_brand = _get_invoice_font("sans", 44, bold=True)
+    font_sub = _get_invoice_font("mono", 20, bold=False)
+    font_label = _get_invoice_font("mono", 18, bold=True)
+    font_meta = _get_invoice_font("mono", 22, bold=True)
+    font_meta_reg = _get_invoice_font("mono", 22, bold=False)
+    font_prod = _get_invoice_font("sans", 31, bold=True)
+    font_total_lbl = _get_invoice_font("mono", 19, bold=True)
+    font_total_val = _get_invoice_font("sans", 56, bold=True)
+    font_stamp = _get_invoice_font("mono", 36, bold=True)
+    font_footer_main = _get_invoice_font("sans", 22, bold=True)
+    font_footer_sub = _get_invoice_font("mono", 18, bold=False)
+
+    cx = (p_left + p_right) // 2
+    in_left = p_left + 64
+    in_right = p_right - 64
+
+    # 1. Header Toko (Tengah)
+    brand_text = "SONEL STORE"
+    brand_w = draw.textlength(brand_text, font=font_brand)
+    draw.text((cx - brand_w / 2, 108), brand_text, fill=ink_primary, font=font_brand)
+
+    sub_text = "BUKTI PEMBAYARAN RESMI"
+    sub_w = draw.textlength(sub_text, font=font_sub)
+    draw.text((cx - sub_w / 2, 168), sub_text, fill=ink_muted, font=font_sub)
+
+    _draw_dashed_line(draw, p_left + 28, p_right - 28, notch_y, fill=paper_edge, dash=12, gap=9, width=2)
+
+    # 2. Metadata Order & Waktu (2 kolom asimetris)
+    meta_y = 282
+    draw.text((in_left, meta_y), "NO. ORDER", fill=ink_muted, font=font_label)
+    draw.text((in_left, meta_y + 28), order_ref, fill=ink_primary, font=font_meta)
+
+    waktu_lbl = "WAKTU TRANSAKSI"
+    waktu_lbl_w = draw.textlength(waktu_lbl, font=font_label)
+    waktu_val_w = draw.textlength(waktu_str, font=font_meta_reg)
+    draw.text((in_right - waktu_lbl_w, meta_y), waktu_lbl, fill=ink_muted, font=font_label)
+    draw.text((in_right - waktu_val_w, meta_y + 28), waktu_str, fill=ink_primary, font=font_meta_reg)
+
+    draw.line([(in_left, 368), (in_right, 368)], fill=rule_strong, width=2)
+
+    # 3. Tabel Item Produk
+    tbl_y = 390
+    qty_col_x = in_right - 210
+    draw.text((in_left, tbl_y), "ITEM", fill=ink_muted, font=font_label)
+
+    qty_hdr = "QTY"
+    qty_hdr_w = draw.textlength(qty_hdr, font=font_label)
+    draw.text((qty_col_x - qty_hdr_w, tbl_y), qty_hdr, fill=ink_muted, font=font_label)
+
+    hrg_hdr = "JUMLAH"
+    hrg_hdr_w = draw.textlength(hrg_hdr, font=font_label)
+    draw.text((in_right - hrg_hdr_w, tbl_y), hrg_hdr, fill=ink_muted, font=font_label)
+
+    draw.line([(in_left, 424), (in_right, 424)], fill=rule_soft, width=2)
 
     fmt_rupiah = f"Rp {total_amount:,.0f}".replace(",", ".")
-    draw.text((tot_x1 + 35, tot_y1 + 22), "TOTAL PEMBAYARAN", fill=(148, 163, 184), font=font_hero_lbl)
-    draw.text((tot_x1 + 35, tot_y1 + 62), fmt_rupiah, fill=(56, 189, 248), font=font_hero_val)
+    qty_str = f"{qty}x"
+    qty_w = draw.textlength(qty_str, font=font_meta)
+    hrg_w = draw.textlength(fmt_rupiah, font=font_meta)
 
-    # Verified Seal pill di dalam box total
-    v_w, v_h = 165, 46
-    v_x, v_y = tot_x2 - 35 - v_w, tot_y1 + 62
-    draw.rounded_rectangle(
-        [v_x, v_y, v_x + v_w, v_y + v_h],
-        radius=23,
-        fill=(6, 78, 59),
-        outline=(16, 185, 129),
-        width=2,
-    )
-    # Checkmark vector icon
-    chk_x, chk_y = v_x + 24, v_y + 24
-    draw.line([(chk_x, chk_y), (chk_x + 5, chk_y + 6)], fill=(52, 211, 153), width=3)
-    draw.line([(chk_x + 5, chk_y + 6), (chk_x + 14, chk_y - 7)], fill=(52, 211, 153), width=3)
-    draw.text((v_x + 48, v_y + 9), "VERIFIED", fill=(52, 211, 153), font=font_verif)
+    prod_max_w = max(220, int(qty_col_x - qty_w - in_left - 34))
+    prod_lines = _wrap_text_to_width(draw, product_name, font_prod, prod_max_w, max_lines=2)
 
-    # 8. Bagian Nama Produk
-    prod_y = card_y1 + 235
-    draw.text((card_x1 + 40, prod_y), "PRODUK DIBELI", fill=(148, 163, 184), font=font_prod_lbl)
-    disp_name = product_name if len(product_name) <= 36 else product_name[:34] + "..."
-    draw.text((card_x1 + 40, prod_y + 36), disp_name, fill=(248, 250, 252), font=font_prod_name)
+    item_y = 446
+    for idx, line in enumerate(prod_lines):
+        draw.text((in_left, item_y + idx * 40), line, fill=ink_primary, font=font_prod)
 
-    # Garis Pembatas 1
-    div1_y = prod_y + 100
-    draw.line([(card_x1 + 40, div1_y), (card_x2 - 40, div1_y)], fill=(45, 59, 80), width=2)
+    draw.text((qty_col_x - qty_w, item_y + 6), qty_str, fill=ink_primary, font=font_meta)
+    draw.text((in_right - hrg_w, item_y + 6), fmt_rupiah, fill=ink_primary, font=font_meta)
 
-    # 9. Tabel Rincian Transaksi
-    rows = [
-        ("Order ID", order_ref, True),
-        ("Jumlah Unit", f"{qty}", False),
-        ("Metode Pembayaran", "QRIS Real-Time (Instant)", False),
-        ("Waktu Transaksi", waktu_str, False),
-        ("Pembeli", buyer_name, False),
+    sub_div_y = item_y + (len(prod_lines) * 40) + 28
+    _draw_dashed_line(draw, in_left, in_right, sub_div_y, fill=rule_soft, dash=8, gap=8, width=2)
+
+    # 4. Rincian Tambahan (tanpa kolom titik dua mengambang)
+    detail_rows = [
+        ("Pembeli", buyer_name or "-", ink_primary),
+        ("Metode", "QRIS (Instant)", ink_primary),
+        ("Status", "Pembayaran Diterima", stamp_ink),
     ]
+    curr_y = sub_div_y + 24
+    for lbl, val, val_color in detail_rows:
+        draw.text((in_left, curr_y), lbl, fill=ink_muted, font=font_meta_reg)
+        val_w = draw.textlength(val, font=font_meta)
+        draw.text((in_right - val_w, curr_y), val, fill=val_color, font=font_meta)
+        curr_y += 42
 
-    curr_y = div1_y + 28
-    row_spacing = 64
-    for label, val, is_mono in rows:
-        draw.text((card_x1 + 40, curr_y), label, fill=(148, 163, 184), font=font_row_lbl)
-        draw.text((card_x1 + 350, curr_y), ":", fill=(148, 163, 184), font=font_row_lbl)
-        if is_mono:
-            draw.text((card_x1 + 375, curr_y - 2), val, fill=(251, 191, 36), font=font_row_mono)
-        else:
-            draw.text((card_x1 + 375, curr_y), val, fill=(241, 245, 249), font=font_row_val)
-        curr_y += row_spacing
+    # 5. Blok Total & Stempel LUNAS
+    tot_div_y = 720
+    draw.line([(in_left, tot_div_y), (in_right, tot_div_y)], fill=rule_strong, width=2)
+    draw.line([(in_left, tot_div_y + 6), (in_right, tot_div_y + 6)], fill=rule_strong, width=1)
 
-    # Garis Pembatas 2
-    div2_y = curr_y + 10
-    draw.line([(card_x1 + 40, div2_y), (card_x2 - 40, div2_y)], fill=(45, 59, 80), width=2)
+    _draw_rubber_stamp(
+        img,
+        center_x=in_left + 115,
+        center_y=808,
+        label="LUNAS",
+        font=font_stamp,
+        ink_color=stamp_ink,
+        angle=7.0,
+    )
+    draw = ImageDraw.Draw(img)
 
-    # 10. Catatan Keamanan / Instant Delivery
-    note_text = "Terverifikasi Otomatis  •  Pengiriman Instan Real-Time"
-    note_bbox = draw.textbbox((0, 0), note_text, font=font_note)
-    note_w = note_bbox[2] - note_bbox[0]
-    draw.text(((width - note_w) // 2, div2_y + 24), note_text, fill=(148, 163, 184), font=font_note)
+    tot_lbl = "TOTAL DIBAYAR"
+    tot_lbl_w = draw.textlength(tot_lbl, font=font_total_lbl)
+    draw.text((in_right - tot_lbl_w, 752), tot_lbl, fill=ink_muted, font=font_total_lbl)
 
-    # 11. Footer Tengah
-    footer_text = "Sonel Store Auto-Order • Transaksi Aman & Terenkripsi"
-    footer_bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
-    footer_w = footer_bbox[2] - footer_bbox[0]
-    draw.text(((width - footer_w) // 2, height - 55), footer_text, fill=(100, 116, 139), font=font_footer)
+    tot_val_w = draw.textlength(fmt_rupiah, font=font_total_val)
+    draw.text((in_right - tot_val_w, 780), fmt_rupiah, fill=ink_primary, font=font_total_val)
+
+    # 6. Footer Nota
+    foot_div_y = 886
+    _draw_dashed_line(draw, in_left, in_right, foot_div_y, fill=paper_edge, dash=10, gap=8, width=2)
+
+    thanks_text = "Terima kasih telah berbelanja di Sonel Store"
+    thanks_w = draw.textlength(thanks_text, font=font_footer_main)
+    draw.text((cx - thanks_w / 2, 912), thanks_text, fill=ink_primary, font=font_footer_main)
+
+    ch_label = store_channel.strip() if store_channel and store_channel.strip() else "@nelstores"
+    foot_sub = f"Nota diterbitkan otomatis untuk order {ch_label}"
+    foot_sub_w = draw.textlength(foot_sub, font=font_footer_sub)
+    draw.text((cx - foot_sub_w / 2, 948), foot_sub, fill=ink_muted, font=font_footer_sub)
 
     bio = io.BytesIO()
     bio.name = "invoice.jpg"
-    img.save(bio, "JPEG", quality=95)
+    img.convert("RGB").save(bio, "JPEG", quality=95)
     bio.seek(0)
     return bio
 
@@ -3163,6 +3797,7 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
             total_amount=total_amount,
             buyer_name=buyer_text,
             waktu_str=f"{waktu_str} WIB",
+            store_channel=channel,
         )
 
         await bot_instance.send_photo(
