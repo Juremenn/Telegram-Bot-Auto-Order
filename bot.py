@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 _app: Application | None = None
 # Standalone Bot client (dipakai oleh webhook.py jika dijalankan terpisah dari bot.py)
 _standalone_bot: Bot | None = None
+# Embedded FastAPI/Uvicorn webhook server (dijalankan otomatis bersama bot.py)
+_webhook_server: Any = None
+_webhook_task: asyncio.Task | None = None
 
 
 async def _get_bot() -> Bot:
@@ -132,6 +135,12 @@ def log_error(title: str, detail: str | Exception = "") -> None:
 
 def print_startup_banner() -> None:
     """Tampilkan banner startup yang keren di terminal."""
+    webhook_enabled = os.getenv("ENABLE_WEBHOOK", "true").strip().lower() not in ("0", "false", "no")
+    webhook_info = (
+        f"{C_GREEN}Active ({config.WEBHOOK_HOST}:{config.WEBHOOK_PORT}){C_RESET}"
+        if (webhook_enabled and config.WEBHOOK_PORT > 0)
+        else f"{C_YELLOW}Disabled{C_RESET}"
+    )
     banner = f"""
 {C_CYAN}{C_BOLD}╔══════════════════════════════════════════════════════════════╗
 ║              ⚡ SONEL STORE AUTO-ORDER BOT ⚡                ║
@@ -139,6 +148,7 @@ def print_startup_banner() -> None:
 ╚══════════════════════════════════════════════════════════════╝{C_RESET}
 {C_DIM}┌──────────────────────────────────────────────────────────────┐{C_RESET}
   {C_GREEN}●{C_RESET} {C_BOLD}Status Bot{C_RESET}    : {C_GREEN}Active & Listening (Polling){C_RESET}
+  {C_GREEN}●{C_RESET} {C_BOLD}Webhook Server{C_RESET}: {webhook_info}
   {C_MAGENTA}👑{C_RESET} {C_BOLD}Owner ID{C_RESET}      : {C_WHITE}{config.ADMIN_TELEGRAM_ID}{C_RESET}
   {C_BLUE}📢{C_RESET} {C_BOLD}Channel{C_RESET}       : {C_CYAN}{config.FORCE_SUB_CHANNEL}{C_RESET}
   {C_YELLOW}💾{C_RESET} {C_BOLD}Database{C_RESET}      : {C_WHITE}{config.DB_PATH}{C_RESET}
@@ -3205,6 +3215,76 @@ async def post_init(application: Application) -> None:
     except Exception:
         logger.exception("Gagal inisialisasi auto check pending orders")
 
+    # Jalankan embedded FastAPI webhook server di event loop yang sama
+    _start_embedded_webhook(application)
+
+
+def _start_embedded_webhook(application: Application) -> None:
+    """Jalankan Uvicorn webhook server di background task bersama bot.py."""
+    global _webhook_server, _webhook_task
+
+    if os.getenv("ENABLE_WEBHOOK", "true").strip().lower() in ("0", "false", "no"):
+        logger.info("Embedded webhook dinonaktifkan oleh ENABLE_WEBHOOK.")
+        return
+
+    if config.WEBHOOK_PORT <= 0:
+        return
+
+    try:
+        import uvicorn
+        from webhook import app as webhook_app
+    except Exception:
+        logger.exception("Gagal mengimpor uvicorn/webhook; webhook embedded tidak dijalankan.")
+        return
+
+    class _EmbeddedUvicornServer(uvicorn.Server):
+        """Nonaktifkan signal handler Uvicorn agar tidak bentrok dengan python-telegram-bot."""
+
+        def install_signal_handlers(self) -> None:
+            return None
+
+    uv_config = uvicorn.Config(
+        webhook_app,
+        host=config.WEBHOOK_HOST,
+        port=config.WEBHOOK_PORT,
+        log_level="info",
+        log_config=None,
+    )
+    server = _EmbeddedUvicornServer(uv_config)
+    _webhook_server = server
+
+    async def _run_webhook() -> None:
+        try:
+            await server.serve()
+        except (SystemExit, Exception) as exc:
+            logger.error(
+                "Embedded webhook berhenti (%s:%s): %s",
+                config.WEBHOOK_HOST,
+                config.WEBHOOK_PORT,
+                exc,
+            )
+
+    _webhook_task = application.create_task(_run_webhook())
+    logger.info(
+        "Embedded webhook server dijalankan di http://%s:%s",
+        config.WEBHOOK_HOST,
+        config.WEBHOOK_PORT,
+    )
+
+
+async def _stop_embedded_webhook() -> None:
+    """Hentikan embedded Uvicorn webhook server secara graceful saat bot shutdown."""
+    global _webhook_server, _webhook_task
+    if _webhook_server is not None:
+        _webhook_server.should_exit = True
+    if _webhook_task is not None:
+        try:
+            await _webhook_task
+        except (asyncio.CancelledError, SystemExit, Exception):
+            pass
+    _webhook_server = None
+    _webhook_task = None
+
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler global untuk mencatat error Telegram dengan rapi di terminal."""
@@ -3219,6 +3299,10 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 async def post_shutdown(application: Application) -> None:
     """Bersihkan resource koneksi eksternal saat bot shutdown."""
+    try:
+        await _stop_embedded_webhook()
+    except Exception:
+        logger.exception("Gagal menghentikan embedded webhook saat shutdown")
     try:
         await paykita.close_client()
     except Exception:
