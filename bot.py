@@ -2448,13 +2448,13 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
 
     max_seconds = config.ORDER_EXPIRY_MINUTES * 60
     while elapsed < max_seconds:
-        # Adaptive interval: 4s untuk 2 menit pertama, 8s untuk 8 menit berikutnya, lalu 15s
-        if elapsed < 120:
-            delay = 4
+        # Adaptive interval: 2s untuk 3 menit pertama, 4s untuk 7 menit berikutnya, lalu 8s
+        if elapsed < 180:
+            delay = 2
         elif elapsed < 600:
-            delay = 8
+            delay = 4
         else:
-            delay = 15
+            delay = 8
 
         await asyncio.sleep(delay)
         elapsed += delay
@@ -3217,6 +3217,14 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     log_error("Telegram Exception", err_str)
 
 
+async def post_shutdown(application: Application) -> None:
+    """Bersihkan resource koneksi eksternal saat bot shutdown."""
+    try:
+        await paykita.close_client()
+    except Exception:
+        logger.exception("Gagal menutup PayKita HTTP client saat shutdown")
+
+
 def create_application() -> Application:
     """Buat dan konfigurasi Application bot."""
     global _app
@@ -3225,6 +3233,7 @@ def create_application() -> Application:
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 

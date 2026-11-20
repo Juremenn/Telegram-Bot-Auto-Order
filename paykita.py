@@ -9,6 +9,7 @@ Catatan penting:
 - Semua endpoint, field, dan struktur mengacu pada dokumentasi resmi PayKita.
 """
 
+import asyncio
 import logging
 import hashlib
 import hmac
@@ -23,6 +24,29 @@ logger = logging.getLogger(__name__)
 
 # Timeout untuk request ke PayKita (detik)
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# Shared HTTP client agar koneksi TLS ke PayKita bisa di-reuse (keep-alive)
+_client: httpx.AsyncClient | None = None
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Ambil atau buat ulang shared AsyncClient untuk event loop yang aktif."""
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if _client is None or _client.is_closed or _client_loop is not loop:
+        _client = httpx.AsyncClient(timeout=_TIMEOUT)
+        _client_loop = loop
+    return _client
+
+
+async def close_client() -> None:
+    """Tutup shared AsyncClient saat aplikasi shutdown."""
+    global _client, _client_loop
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
+    _client_loop = None
 
 
 # ── Data class response ───────────────────────────────────────────────────────
@@ -77,8 +101,8 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        client = _get_client()
+        resp = await client.post(url, json=payload, headers=headers)
 
         # Catat HTTP status tanpa menampilkan API key
         logger.info("PayKita create_order → status=%s ref=%s", resp.status_code, reference)
@@ -190,8 +214,8 @@ async def get_order_status(paykita_id: str) -> dict | None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.get(url, headers=headers)
+        client = _get_client()
+        resp = await client.get(url, headers=headers)
 
         if resp.is_success:
             body = resp.json()
