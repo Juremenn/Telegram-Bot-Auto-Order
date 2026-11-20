@@ -133,7 +133,7 @@ async def create_order(base_amount: int, reference: str) -> OrderResult:
         # Ambil nominal pembayaran (PayKita menggunakan 'pay_amount' yang sudah termasuk fee/kode unik)
         amount_val = data.get("pay_amount") or data.get("final_amount") or data.get("base_amount")
         try:
-            final_amount = int(amount_val) if amount_val is not None else None
+            final_amount = int(float(amount_val)) if amount_val is not None else None
         except (ValueError, TypeError):
             final_amount = None
 
@@ -232,6 +232,13 @@ def verify_webhook_signature(raw_body: bytes, received_signature: str) -> bool:
         )
         return False
 
+    if not received_signature:
+        return False
+
+    sig = received_signature.strip().lower()
+    if sig.startswith("sha256="):
+        sig = sig[7:]
+
     expected = hmac.new(
         secret.encode("utf-8"),
         raw_body,
@@ -239,7 +246,7 @@ def verify_webhook_signature(raw_body: bytes, received_signature: str) -> bool:
     ).hexdigest()
 
     # Gunakan compare_digest untuk mencegah timing attack
-    return hmac.compare_digest(expected, received_signature.lower())
+    return hmac.compare_digest(expected, sig)
 
 
 def parse_webhook_payload(raw_body: bytes) -> dict | None:

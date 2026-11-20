@@ -51,6 +51,16 @@ async def on_startup() -> None:
     logger.info("Webhook server siap. Menunggu event dari PayKita...")
 
 
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    """Tutup standalone Bot client saat FastAPI shutdown."""
+    try:
+        from bot import close_standalone_bot
+        await close_standalone_bot()
+    except Exception:
+        logger.exception("Gagal menutup standalone Bot client saat shutdown")
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -165,12 +175,15 @@ async def _process_webhook_event(payload: dict) -> None:
         "Webhook: order %s berubah %s → %s", order_ref, curr_status, new_status
     )
 
-    # Update status di database
-    db.update_order_status(order_ref, new_status)
-
-    # Proses fulfillment jika pembayaran berhasil
+    # Jalankan fulfillment SEBELUM update status agar atomic guard
+    # PENDING → PROCESSING di execute_order_fulfillment berjalan semestinya.
     if new_status == "PAID":
         await _run_fulfillment(order_ref, order)
+    elif new_status in ("EXPIRED", "FAILED", "CANCELLED"):
+        db.update_order_status(order_ref, new_status)
+        db.release_order_stock(order_ref)
+    else:
+        db.update_order_status(order_ref, new_status)
 
 
 async def _run_fulfillment(order_ref: str, order) -> None:

@@ -45,7 +45,7 @@ WEBHOOK_HOST: str = _optional("WEBHOOK_HOST", "0.0.0.0")
 WEBHOOK_PORT: int = int(_optional("WEBHOOK_PORT", "8000"))
 
 # URL publik server ini (digunakan untuk registrasi webhook ke PayKita jika ada)
-# Contoh: https://yourdomain.com
+# Contoh: https://pay.nel.web.id
 PUBLIC_URL: str = _optional("PUBLIC_URL", "")
 
 # ── Database ──────────────────────────────────────────────────────────────────

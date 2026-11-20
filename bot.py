@@ -48,8 +48,29 @@ import paykita
 
 logger = logging.getLogger(__name__)
 
-# Referensi global ke Application (dipakai oleh webhook.py)
+# Referensi global ke Application (dipakai saat bot.py berjalan)
 _app: Application | None = None
+# Standalone Bot client (dipakai oleh webhook.py jika dijalankan terpisah dari bot.py)
+_standalone_bot: Bot | None = None
+
+
+async def _get_bot() -> Bot:
+    """Ambil Bot dari Application jika aktif, atau buat standalone Bot untuk webhook."""
+    global _standalone_bot
+    if _app is not None:
+        return _app.bot
+    if _standalone_bot is None:
+        _standalone_bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+        await _standalone_bot.initialize()
+    return _standalone_bot
+
+
+async def close_standalone_bot() -> None:
+    """Tutup standalone Bot client saat webhook server shutdown."""
+    global _standalone_bot
+    if _standalone_bot is not None:
+        await _standalone_bot.shutdown()
+        _standalone_bot = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Terminal ANSI Colors & Beautiful Logger ───────────────────────────────────
@@ -318,6 +339,26 @@ def _is_admin(user_id: int) -> bool:
     return user_id == config.ADMIN_TELEGRAM_ID
 
 
+# ── Anti-Spam & Rate Limiting ─────────────────────────────────────────────────
+_user_action_history: dict[int, list[float]] = {}
+_RATE_LIMIT_ACTIONS = 6     # Maksimal aksi
+_RATE_LIMIT_WINDOW = 2.0    # Jendela waktu dalam detik
+
+def _check_rate_limit(user_id: int) -> bool:
+    """Mencegah flooding / spam klik dari user non-admin. Return True jika request diizinkan."""
+    if _is_admin(user_id):
+        return True
+    now = datetime.now(timezone.utc).timestamp()
+    history = _user_action_history.setdefault(user_id, [])
+    # Bersihkan timestamps di luar rentang window waktu
+    history = [t for t in history if now - t < _RATE_LIMIT_WINDOW]
+    _user_action_history[user_id] = history
+    if len(history) >= _RATE_LIMIT_ACTIONS:
+        return False
+    history.append(now)
+    return True
+
+
 def _build_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Buat keyboard menu utama yang rapi dan compact."""
     buttons = [
@@ -485,12 +526,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parts = data.split(":")
     action = parts[0]
 
-    # Log interaksi callback
-    if user:
-        if action.startswith("admin"):
-            log_admin(user, f"Tombol: {data}")
-        elif action in ("product", "buy", "buy_qty", "cancel_order"):
-            log_customer(user, f"Tombol: {data}")
+    # ── Security Check: Anti-Flood Rate Limiting ──
+    if user and not _check_rate_limit(user.id):
+        try:
+            await query.answer("⏳ Terlalu cepat! Mohon tunggu sebentar...", show_alert=False)
+        except Exception:
+            pass
+        return
+
+    # ── Security Check: Akses Khusus Admin / Owner ──
+    if action.startswith("admin"):
+        if user is None or not _is_admin(user.id):
+            if user:
+                log_customer(user, f"Percobaan akses tidak sah ke admin callback: {data}")
+            try:
+                await query.answer("⛔ Akses ditolak! Khusus Owner/Admin.", show_alert=True)
+            except Exception:
+                pass
+            return
 
     # Khusus verifikasi keanggotaan channel jika tombol lama ditekan
     if action == "check_sub":
@@ -603,6 +656,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     await _handle_admin_delete_ask(update, context, pid)
                 elif sub_action == "do":
                     await _handle_admin_delete_do(update, context, pid)
+        case "admin_promo":
+            sub_action = parts[1] if len(parts) > 1 else ""
+            if sub_action == "preview":
+                await _show_admin_promo_preview(update, context)
+            elif sub_action == "send":
+                await _handle_admin_promo_send(update, context)
         case _:
             await _safe_edit_or_send_text(update, context, text="❓ Aksi tidak dikenali.")
 
@@ -889,6 +948,133 @@ async def _show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, fo
         await _safe_edit_or_send_text(update, context, text=text, reply_markup=keyboard, force_new=force_new)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Promo / Katalog Produk (Admin Only) ──────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_promo_text() -> str:
+    """Generate teks promo katalog produk untuk di-forward/share admin."""
+    products = db.get_all_products()
+
+    lines = [
+        "<b>SONEL STORE</b>",
+        "",
+    ]
+
+    if not products:
+        lines.append("<i>Belum ada produk tersedia saat ini.</i>")
+    else:
+        for idx, p in enumerate(products, 1):
+            if p["stock"] == -1:
+                stok_label = "♾️ Unlimited"
+            elif p["stock"] == 0:
+                stok_label = "❌ Kosong"
+            else:
+                stok_label = f"{p['stock']} unit"
+
+            p_name_esc = html.escape(p["name"])
+            lines.append(f"{idx}. <b>{p_name_esc}</b>")
+            lines.append(f"   💰 {_fmt_rupiah(p['price'])} | 📦 {stok_label}")
+            lines.append("")
+
+    lines += [
+        "🛍️Order @Sonelzbot",
+        "❓ @GwSonel",
+        "⭐ @nelstores",
+    ]
+    return "\n".join(lines)
+
+
+
+async def _handle_admin_promo_send(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Kirim pesan promo katalog sebagai pesan baru (bisa di-forward oleh admin)."""
+    user = update.effective_user
+    query = update.callback_query
+    if user is None or not _is_admin(user.id):
+        return
+
+    promo_text = _build_promo_text()
+
+    await query.answer("✅ Pesan promo dikirim!", show_alert=False)
+
+    # Kirim sebagai pesan baru terpisah agar mudah di-forward
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=promo_text,
+        parse_mode=ParseMode.HTML,
+    )
+
+    log_admin(user, "Mengirim pesan promo katalog produk")
+
+    # Kirim notifikasi singkat dengan tombol kembali
+    notif = (
+        "✅ <b>Pesan promo berhasil dibuat!</b>\n\n"
+        "<i>Salin atau forward pesan di atas ke grup/channel promosi Anda.</i>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Kembali ke Panel", callback_data="admin:stock")],
+    ])
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=notif,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler /promo - Generate pesan promo katalog (Owner only)"""
+    user = update.effective_user
+    if user is None or not _is_admin(user.id):
+        if user:
+            log_customer(user, "Mencoba mengakses /promo (Ditolak: Bukan Owner)")
+        await update.message.reply_text("⛔ Perintah ini hanya untuk admin/owner.")
+        return
+    log_admin(user, "Menjalankan /promo — generate pesan promo katalog")
+    await _show_admin_promo_preview(update, context, edit=False)
+
+
+async def _show_admin_promo_preview(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True
+) -> None:
+    """Tampilkan pratinjau pesan promo katalog ke admin sebelum dikirim."""
+    user = update.effective_user
+    if user is None or not _is_admin(user.id):
+        return
+
+    promo_text = _build_promo_text()
+
+    header = (
+        "📣 <b>Pratinjau Pesan Promo Katalog</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Pesan di bawah ini yang akan dikirim:</i>\n\n"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🚀 Kirim Pesan Promo Ini", callback_data="admin_promo:send"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Kembali ke Panel", callback_data="admin:stock"),
+        ],
+    ])
+
+    if edit:
+        await _safe_edit_or_send_text(
+            update, context,
+            text=header + promo_text,
+            reply_markup=keyboard,
+        )
+    else:
+        await update.message.reply_text(
+            text=header + promo_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML,
+        )
+
+
 # ── Owner / Admin UI ──────────────────────────────────────────────────────────
 
 async def _show_admin_stock_list(
@@ -911,7 +1097,10 @@ async def _show_admin_stock_list(
         [
             InlineKeyboardButton("➕ Tambah Produk", callback_data="admin_add:start"),
             InlineKeyboardButton("📢 Broadcast Pesan", callback_data="admin_bcast:start"),
-        ]
+        ],
+        [
+            InlineKeyboardButton("📣 Share Promo Produk", callback_data="admin_promo:preview"),
+        ],
     ]
 
     if products:
@@ -1594,6 +1783,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if user is None:
         return
 
+    # Anti-flood rate limiting
+    if not _check_rate_limit(user.id):
+        return
+
     text = (update.message.text or "").strip()
     if not text:
         return
@@ -1996,8 +2189,9 @@ async def _show_product_list(
         else:
             stock_str = f"📦 Stok: {p['stock']}"
 
+        p_name_esc = html.escape(p["name"])
         text_lines.append(
-            f"<b>{i}. {p['name']}</b>\n"
+            f"<b>{i}. {p_name_esc}</b>\n"
             f"   💰 {_fmt_rupiah(p['price'])} | {stock_str}\n"
         )
 
@@ -2041,10 +2235,12 @@ async def _show_product_detail(
     else:
         stock_text = f"📦 {product['stock']}"
 
-    desc_line = f"\n📝 <b>Deskripsi:</b>\n{product['description']}\n" if product["description"] else ""
+    p_name_esc = html.escape(product["name"])
+    desc_esc = html.escape(product["description"]) if product["description"] else ""
+    desc_line = f"\n📝 <b>Deskripsi:</b>\n{desc_esc}\n" if desc_esc else ""
 
     text = (
-        f"📦 <b>{product['name']}</b>\n"
+        f"📦 <b>{p_name_esc}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
         f"{desc_line}\n"
         f"💰 <b>Harga:</b> <b>{_fmt_rupiah(product['price'])}</b>\n"
@@ -2237,7 +2433,19 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
     3. Kirim pesan teks invoice & akun baru yang rapi.
     4. Otomatis PIN pesan teks invoice tersebut di chat pembeli!
     """
+    # Hitung waktu kadaluarsa aktual berdasarkan created_at di database
+    order_init = db.get_order_by_ref(order_ref)
     elapsed = 0
+    if order_init and order_init["created_at"]:
+        try:
+            created_dt = datetime.fromisoformat(order_init["created_at"])
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            elapsed = max(0, int((now_dt - created_dt).total_seconds()))
+        except Exception:
+            elapsed = 0
+
     max_seconds = config.ORDER_EXPIRY_MINUTES * 60
     while elapsed < max_seconds:
         # Adaptive interval: 4s untuk 2 menit pertama, 8s untuk 8 menit berikutnya, lalu 15s
@@ -2265,8 +2473,9 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
                 if pk_status == "PAID":
                     delivery_text = await execute_order_fulfillment(order_ref, order, send_notification=False)
                     order = db.get_order_by_ref(order_ref)
-                    produk_obj = db.get_product(order["product_id"])
+                    produk_obj = db.get_product(order["product_id"], include_inactive=True) if order else None
                     produk_nama = produk_obj["name"] if produk_obj else "–"
+                    prod_nama_esc = html.escape(produk_nama)
 
                     # Log pembayaran berhasil di terminal
                     log_payment(f"✅ {order_ref} PAID / LUNAS ({_fmt_rupiah(order['final_amount'] or order['base_amount'])}) | Produk: {produk_nama}")
@@ -2274,11 +2483,11 @@ async def _auto_check_payment(order_ref: str, chat_id: int, message_id: int) -> 
                     text = (
                         f"🎉 <b>Pembayaran Berhasil!</b>\n\n"
                         f"🆔 <b>Order ID:</b> <code>{order['order_ref']}</code>\n"
-                        f"📦 <b>Produk:</b> {produk_nama}\n"
+                        f"📦 <b>Produk:</b> {prod_nama_esc}\n"
                         f"💰 <b>Total:</b> {_fmt_rupiah(order['final_amount'] or order['base_amount'])}\n"
                         f"📅 <b>Waktu:</b> {order['created_at'][:19]}\n\n"
                         f"📬 <b>Detail Akun / Lisensi:</b>\n"
-                        f"<code>{delivery_text or 'Pesanan Anda telah berhasil diproses.'}</code>\n\n"
+                        f"{delivery_text or 'Pesanan Anda telah berhasil diproses.'}\n\n"
                         f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
                     )
                     buttons = [
@@ -2363,7 +2572,7 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
     # Re-read setelah mark (untuk mendapatkan data terbaru)
     order = db.get_order_by_ref(order_ref) or order
 
-    product = db.get_product(order["product_id"])
+    product = db.get_product(order["product_id"], include_inactive=True)
     product_name = product["name"] if product else "Produk"
     qty = order["qty"] if ("qty" in order.keys() and order["qty"]) else 1
 
@@ -2371,18 +2580,18 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
     claimed_items = db.claim_reserved_stock_items(product_id=order["product_id"], order_id=order["id"], qty=qty)
     if claimed_items:
         if len(claimed_items) == 1:
-            delivery = claimed_items[0]
+            delivery = f"<code>{html.escape(claimed_items[0])}</code>"
         else:
             blocks = []
             for idx, item_content in enumerate(claimed_items, 1):
-                blocks.append(f"📦 <b>[ Akun #{idx} ]</b>\n<code>{item_content}</code>")
+                blocks.append(f"📦 <b>[ Akun #{idx} ]</b>\n<code>{html.escape(item_content)}</code>")
             delivery = "\n\n━━━━━━━━━━━━━━━━━━━━━\n\n".join(blocks)
     elif product and "delivery_content" in product.keys() and product["delivery_content"] and product["delivery_content"].strip():
         base_deliv = product["delivery_content"].strip()
         if qty > 1:
-            delivery = f"🔢 <b>Jumlah:</b> {qty} unit\n\n{base_deliv}"
+            delivery = f"🔢 <b>Jumlah:</b> {qty} unit\n\n<code>{html.escape(base_deliv)}</code>"
         else:
-            delivery = base_deliv
+            delivery = f"<code>{html.escape(base_deliv)}</code>"
     else:
         delivery = "⚠️ <i>Stok akun sedang kosong. Silakan hubungi admin toko dengan mengirimkan Order ID ini untuk klaim akun Anda.</i>"
 
@@ -2399,14 +2608,15 @@ async def execute_order_fulfillment(order_ref: str, order, send_notification: bo
         logger.warning("Gagal memicu pengiriman invoice channel untuk ref %s: %s", order_ref, err)
 
     if send_notification:
+        prod_name_esc = html.escape(product_name)
         msg = (
             f"🎉 <b>Pembayaran Berhasil!</b>\n\n"
             f"🆔 <b>Order ID:</b> <code>{order_ref}</code>\n"
-            f"📦 <b>Produk:</b> {product_name}\n"
+            f"📦 <b>Produk:</b> {prod_name_esc}\n"
             f"💰 <b>Total:</b> {_fmt_rupiah(order['final_amount'] or order['base_amount'])}\n"
             f"✅ <b>Status:</b> PAID (SELESAI)\n\n"
             f"📬 <b>Detail Akun / Lisensi:</b>\n"
-            f"<code>{delivery}</code>\n\n"
+            f"{delivery}\n\n"
             f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
         )
         await send_payment_notification(order["user_id"], order_ref, msg)
@@ -2449,20 +2659,25 @@ async def _show_order_detail(
         except Exception:
             logger.exception("Gagal sinkronisasi status live ke PayKita ref=%s", order_ref)
 
-    produk_obj = db.get_product(order["product_id"])
+    produk_obj = db.get_product(order["product_id"], include_inactive=True) if order else None
     produk_nama = produk_obj["name"] if produk_obj else "–"
+    prod_nama_esc = html.escape(produk_nama)
 
     # JIKA SUDAH PAID / COMPLETED: Tampilkan info akun & selesai
     if order["status"] in ("PAID", "COMPLETED"):
-        delivery_text = order["fulfillment"] or (produk_obj["delivery_content"] if produk_obj and "delivery_content" in produk_obj.keys() else "") or "Pesanan berhasil diproses."
+        delivery_text = order["fulfillment"]
+        if not delivery_text:
+            deliv_raw = produk_obj["delivery_content"] if (produk_obj and "delivery_content" in produk_obj.keys() and produk_obj["delivery_content"]) else ""
+            delivery_text = f"<code>{html.escape(deliv_raw)}</code>" if deliv_raw else "Pesanan berhasil diproses."
+
         text = (
             f"🎉 <b>Pembayaran Berhasil!</b>\n\n"
             f"🆔 <b>Order ID:</b> <code>{order['order_ref']}</code>\n"
-            f"📦 <b>Produk:</b> {produk_nama}\n"
+            f"📦 <b>Produk:</b> {prod_nama_esc}\n"
             f"💰 <b>Total:</b> {_fmt_rupiah(order['final_amount'] or order['base_amount'])}\n"
             f"📅 <b>Waktu:</b> {order['created_at'][:19]}\n\n"
             f"📬 <b>Detail Akun / Lisensi:</b>\n"
-            f"<code>{delivery_text}</code>\n\n"
+            f"{delivery_text}\n\n"
             f"<i>Terima kasih telah berbelanja di Sonel Store!</i>"
         )
         buttons = [
@@ -2641,18 +2856,41 @@ async def send_payment_notification(user_db_id: int, order_ref: str, fulfillment
         return
 
     telegram_id = row["telegram_id"]
-    if _app is None:
-        logger.warning("send_payment_notification: _app belum diinisialisasi.")
-        return
-    bot_instance = _app.bot
+    bot_instance = await _get_bot()
 
     try:
-        await _send_with_effect(
+        order = db.get_order_by_ref(order_ref)
+        if order and order["telegram_chat_id"] and order["telegram_msg_id"]:
+            try:
+                await bot_instance.delete_message(
+                    chat_id=order["telegram_chat_id"],
+                    message_id=order["telegram_msg_id"],
+                )
+            except Exception:
+                pass
+
+        buttons = [
+            [InlineKeyboardButton("🛍️ Beli Produk Lain", callback_data="menu:products:new")],
+            [InlineKeyboardButton("🏠 Menu Utama", callback_data="menu:main:new")],
+        ]
+        new_msg = await _send_with_effect(
             bot_instance,
             chat_id=telegram_id,
             text=fulfillment,
+            reply_markup=InlineKeyboardMarkup(buttons),
             effect_id=EFFECT_PARTY,
         )
+        if new_msg:
+            db.update_order_telegram_msg(order_ref, new_msg.chat_id, new_msg.message_id)
+            try:
+                await bot_instance.pin_chat_message(
+                    chat_id=new_msg.chat_id,
+                    message_id=new_msg.message_id,
+                    disable_notification=False,
+                )
+            except Exception as e:
+                logger.warning("Gagal pin pesan order %s: %s", order_ref, e)
+
         # Notifikasi ke admin (hanya jika pembeli bukan admin sendiri)
         if telegram_id != config.ADMIN_TELEGRAM_ID:
             await bot_instance.send_message(
@@ -2854,10 +3092,7 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
     if not channel:
         return
 
-    if _app is None:
-        logger.warning("_send_channel_invoice: _app belum diinisialisasi.")
-        return
-    bot_instance = _app.bot
+    bot_instance = await _get_bot()
 
     try:
         product = db.get_product(order["product_id"])
@@ -2907,7 +3142,7 @@ async def _send_channel_invoice(order_ref: str, order) -> None:
         )
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛒 Beli Sekarang via Bot", url="https://t.me/sonelzbot")]
+            [InlineKeyboardButton("🛒 Beli Sekarang via Bot", url="https://t.me/Sonelzbot")]
         ])
 
         # Generate gambar struk JPG otomatis
@@ -2948,6 +3183,7 @@ async def post_init(application: Application) -> None:
     admin_commands = public_commands + [
         BotCommand("admin",     "👑 Panel Owner (Kelola Produk & Stok)"),
         BotCommand("broadcast", "📢 Broadcast pesan ke semua pengguna"),
+        BotCommand("promo",     "📣 Generate pesan promo katalog produk"),
     ]
     try:
         await application.bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
@@ -2998,6 +3234,7 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("status",    cmd_status))
     application.add_handler(CommandHandler("admin",     cmd_admin))
     application.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    application.add_handler(CommandHandler("promo",     cmd_promo))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
@@ -3021,13 +3258,6 @@ def main() -> None:
     # Matikan log verbose httpx & httpcore agar token bot di URL tidak bocor ke log
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-    # Inisialisasi event loop di MainThread (diperlukan untuk Python 3.12+)
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
 
     db.init_db()
 

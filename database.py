@@ -240,8 +240,12 @@ def get_all_products(only_in_stock: bool = False) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def get_product(product_id: int) -> sqlite3.Row | None:
+def get_product(product_id: int, include_inactive: bool = False) -> sqlite3.Row | None:
     with get_db() as conn:
+        if include_inactive:
+            return conn.execute(
+                "SELECT * FROM products WHERE id = ?", (product_id,)
+            ).fetchone()
         return conn.execute(
             "SELECT * FROM products WHERE id = ? AND is_active = 1", (product_id,)
         ).fetchone()

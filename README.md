@@ -88,7 +88,7 @@ PAYKITA_WEBHOOK_SECRET=your_webhook_secret_here
 # ── Webhook Server (Opsional) ──
 WEBHOOK_HOST=0.0.0.0
 WEBHOOK_PORT=8000
-PUBLIC_URL=https://yourdomain.com
+PUBLIC_URL=https://pay.nel.web.id
 
 # ── Database & Order Expiry ──
 DB_PATH=data/orders.db
